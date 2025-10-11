@@ -51,13 +51,15 @@ bool HackrfDevice::_configure_device() {
     if (result != HACKRF_SUCCESS) {
         return false;
     }
-    spdlog::info("{}############ Device configured ############{}", colors::GREEN, colors::RESET);
+    spdlog::info("{}############ Device configured ############{}",
+                 colors::GREEN, colors::RESET);
     spdlog::info("Center frequency: {}", __center_freq__);
     spdlog::info("Sample rate: {}", __sample_rate__);
     spdlog::info("Bandwidth: {}", __bandwidth__);
     spdlog::info("VGA gain: {}", __vga_gain__);
     spdlog::info("LNA gain: {}", __lna_gain__);
-    spdlog::info("{}###########################################{}", colors::GREEN, colors::RESET);
+    spdlog::info("{}###########################################{}",
+                 colors::GREEN, colors::RESET);
     return true;
 }
 
@@ -70,4 +72,36 @@ std::vector<bool> HackrfDevice::_validate_gains(int vga_gain, int lna_gain) {
         isvalid[1] = false;
     }
     return isvalid;
+}
+
+int HackrfDevice::_rx_callback(hackrf_transfer *transfer) {
+    HackrfDevice *instance = reinterpret_cast<HackrfDevice *>(transfer->rx_ctx);
+    return instance->_handle_rx(transfer);
+}
+
+int HackrfDevice::_handle_rx(hackrf_transfer *transfer) {
+    std::lock_guard<std::mutex> lock(__samples_mutex__);
+    __samples__.insert(__samples__.end(), transfer->buffer,
+                       transfer->buffer + transfer->valid_length);
+    return 0;
+}
+
+bool HackrfDevice::startRx() {
+    int result = hackrf_start_rx(__dev__, _rx_callback, this);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to start RX");
+        return false;
+    }
+    spdlog::info("RX started");
+    return true;
+}
+
+void HackrfDevice::stopRx() {
+    hackrf_stop_rx(__dev__);
+    spdlog::info("RX stopped");
+}
+
+std::vector<uint8_t> HackrfDevice::getIQSamples() {
+    std::lock_guard<std::mutex> lock(__samples_mutex__);
+    return __samples__;
 }
