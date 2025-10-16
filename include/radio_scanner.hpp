@@ -26,6 +26,7 @@ public:
     void stopRx();
 
     std::vector<uint8_t> getIQSamples();
+
 private:
     hackrf_device *__dev__ = nullptr;
     uint64_t __center_freq__ = 0;
