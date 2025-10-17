@@ -5,6 +5,10 @@ project(radio_analyser)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
+
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
     /usr/local/include/libhackrf
@@ -18,6 +22,12 @@ file(GLOB_RECURSE SRC_FILES ${PROJECT_SOURCE_DIR}/src/*.cc)
 add_executable(radio_analyser ${SOURCES} ${SRC_FILES})
 
 find_package(spdlog REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport)
+find_package(QCustomPlot REQUIRED)
 
-target_link_libraries(radio_analyser PRIVATE hackrf spdlog::spdlog Qt6::Widgets)
+target_link_libraries(radio_analyser PRIVATE
+    hackrf
+    spdlog::spdlog
+    Qt6::Widgets
+    QCustomPlot::qcustomplot
+)
