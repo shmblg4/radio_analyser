@@ -1,18 +1,17 @@
 #ifndef RADIO_SCANNER_H
 #define RADIO_SCANNER_H
 
+#include <atomic>
+#include <complex>
 #include <ctime>
 #include <hackrf.h>
 #include <iostream>
+#include <mutex>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <vector>
 
 #include "colors.hpp"
-
-#define CENTER_FREQ_MHZ 434e6
-#define SAMPLE_RATE_MHZ 2e6
-#define BANDWIDTH_MHZ 2e6
 
 class HackrfDevice {
 public:
@@ -25,7 +24,8 @@ public:
     bool startRx();
     void stopRx();
 
-    std::vector<uint8_t> getIQSamples();
+    std::vector<std::complex<float>> getIQSamplesForProcessing();
+    std::vector<double> getMagnitudeSpectrum(int fft_size = 512);
 
 private:
     hackrf_device *__dev__ = nullptr;
@@ -35,13 +35,20 @@ private:
     uint32_t __vga_gain__ = 0;
     uint32_t __lna_gain__ = 0;
 
-    std::vector<uint8_t> __samples__ = {};
-    std::mutex __samples_mutex__ = {};
+    std::vector<int8_t>
+        __samples_buffer__;
+    std::mutex __samples_mutex__;
+    std::atomic<bool> __running__{false};
 
     bool _configure_device();
     std::vector<bool> _validate_gains(int vga_gain, int lna_gain);
     static int _rx_callback(hackrf_transfer *transfer);
     int _handle_rx(hackrf_transfer *transfer);
+
+    std::vector<std::complex<float>>
+    convertRawSamples(const std::vector<int8_t> &raw_samples);
+    std::vector<double> calculateMagnitudeSpectrum(
+        const std::vector<std::complex<float>> &iq_samples, int fft_size);
 };
 
 #endif

@@ -1,4 +1,54 @@
 #include "radio_scanner.hpp"
+#include <cmath>
+#include <fftw3.h>
+
+std::vector<double>
+performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
+                          int fft_size) {
+    if (input.empty()) {
+        return std::vector<double>(fft_size, 0.0);
+    }
+
+    std::vector<std::complex<float>> samples = input;
+    if (static_cast<int>(samples.size()) > fft_size) {
+        samples.resize(fft_size);
+    } else if (static_cast<int>(samples.size()) < fft_size) {
+        samples.resize(fft_size, std::complex<float>(0.0f, 0.0f));
+    }
+
+    for (int i = 0; i < static_cast<int>(samples.size()); ++i) {
+        float window =
+            0.5f * (1.0f - std::cos(2.0f * M_PI * i / (samples.size() - 1)));
+        samples[i] *= window;
+    }
+
+    fftw_complex *in, *out;
+    fftw_plan p;
+
+    in = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * fft_size);
+    out = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * fft_size);
+
+    for (int i = 0; i < fft_size; ++i) {
+        in[i][0] = samples[i].real();
+        in[i][1] = samples[i].imag();
+    }
+
+    p = fftw_plan_dft_1d(fft_size, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+
+    fftw_execute(p);
+
+    std::vector<double> magnitudes(fft_size);
+    for (int i = 0; i < fft_size; ++i) {
+        magnitudes[i] =
+            std::sqrt(out[i][0] * out[i][0] + out[i][1] * out[i][1]);
+    }
+
+    fftw_destroy_plan(p);
+    fftw_free(in);
+    fftw_free(out);
+
+    return magnitudes;
+}
 
 HackrfDevice::HackrfDevice() {
     auto result = hackrf_init();
@@ -14,6 +64,9 @@ HackrfDevice::HackrfDevice() {
 }
 
 HackrfDevice::~HackrfDevice() {
+    if (__running__.load()) {
+        stopRx();
+    }
     hackrf_close(__dev__);
     hackrf_exit();
     spdlog::info("Device closed");
@@ -33,29 +86,39 @@ bool HackrfDevice::configure(uint64_t center_freq, double sample_rate,
 bool HackrfDevice::_configure_device() {
     auto result = hackrf_set_freq(__dev__, __center_freq__);
     if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set frequency: {}",
+                      hackrf_error_name((hackrf_error)result));
         return false;
     }
     result = hackrf_set_vga_gain(__dev__, __vga_gain__);
     if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set VGA gain: {}",
+                      hackrf_error_name((hackrf_error)result));
         return false;
     }
     result = hackrf_set_lna_gain(__dev__, __lna_gain__);
     if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set LNA gain: {}",
+                      hackrf_error_name((hackrf_error)result));
         return false;
     }
     result = hackrf_set_sample_rate(__dev__, __sample_rate__);
     if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set sample rate: {}",
+                      hackrf_error_name((hackrf_error)result));
         return false;
     }
     result = hackrf_set_baseband_filter_bandwidth(__dev__, __bandwidth__);
     if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set bandwidth: {}",
+                      hackrf_error_name((hackrf_error)result));
         return false;
     }
     spdlog::info("{}############ Device configured ############{}",
                  colors::GREEN, colors::RESET);
-    spdlog::info("Center frequency: {}", __center_freq__);
-    spdlog::info("Sample rate: {}", __sample_rate__);
-    spdlog::info("Bandwidth: {}", __bandwidth__);
+    spdlog::info("Center frequency: {} Hz", __center_freq__);
+    spdlog::info("Sample rate: {} Hz", __sample_rate__);
+    spdlog::info("Bandwidth: {} Hz", __bandwidth__);
     spdlog::info("VGA gain: {}", __vga_gain__);
     spdlog::info("LNA gain: {}", __lna_gain__);
     spdlog::info("{}###########################################{}",
@@ -68,7 +131,7 @@ std::vector<bool> HackrfDevice::_validate_gains(int vga_gain, int lna_gain) {
     if (vga_gain < 0 || vga_gain > 62 || vga_gain % 2 != 0) {
         isvalid[0] = false;
     }
-    if (lna_gain < 0 || lna_gain > 62 || lna_gain % 2 != 0) {
+    if (lna_gain < 0 || lna_gain > 40 || lna_gain % 2 != 0) {
         isvalid[1] = false;
     }
     return isvalid;
@@ -81,27 +144,82 @@ int HackrfDevice::_rx_callback(hackrf_transfer *transfer) {
 
 int HackrfDevice::_handle_rx(hackrf_transfer *transfer) {
     std::lock_guard<std::mutex> lock(__samples_mutex__);
-    __samples__.insert(__samples__.end(), transfer->buffer,
-                       transfer->buffer + transfer->valid_length);
+    const int8_t *raw_data = reinterpret_cast<const int8_t *>(transfer->buffer);
+    __samples_buffer__.insert(__samples_buffer__.end(), raw_data,
+                              raw_data + transfer->valid_length);
     return 0;
 }
 
 bool HackrfDevice::startRx() {
-    int result = hackrf_start_rx(__dev__, _rx_callback, this);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to start RX");
+    if (__running__.load()) {
+        spdlog::warn("RX already running");
         return false;
     }
+    int result = hackrf_start_rx(__dev__, _rx_callback, this);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to start RX: {}",
+                      hackrf_error_name((hackrf_error)result));
+        return false;
+    }
+    __running__.store(true);
     spdlog::info("RX started");
     return true;
 }
 
 void HackrfDevice::stopRx() {
+    if (!__running__.load()) {
+        spdlog::warn("RX already stopped");
+        return;
+    }
     hackrf_stop_rx(__dev__);
+    __running__.store(false);
     spdlog::info("RX stopped");
 }
 
-std::vector<uint8_t> HackrfDevice::getIQSamples() {
+std::vector<std::complex<float>> HackrfDevice::getIQSamplesForProcessing() {
     std::lock_guard<std::mutex> lock(__samples_mutex__);
-    return __samples__;
+    std::vector<std::complex<float>> iq_samples =
+        convertRawSamples(__samples_buffer__);
+    __samples_buffer__.clear();
+    return iq_samples;
+}
+
+std::vector<double> HackrfDevice::getMagnitudeSpectrum(int fft_size) {
+    auto iq_samples = getIQSamplesForProcessing();
+    if (iq_samples.empty()) {
+        return std::vector<double>(fft_size, -200.0);
+    }
+    std::vector<double> magnitudes =
+        calculateMagnitudeSpectrum(iq_samples, fft_size);
+
+    std::vector<double> spectrum_db(fft_size);
+    for (int i = 0; i < fft_size; ++i) {
+        double magnitude = magnitudes[i];
+        spectrum_db[i] = 20.0 * std::log10(magnitude + 1e-10);
+    }
+    return spectrum_db;
+}
+
+std::vector<std::complex<float>>
+HackrfDevice::convertRawSamples(const std::vector<int8_t> &raw_samples) {
+    std::vector<std::complex<float>> iq_samples;
+    if (raw_samples.size() % 2 != 0) {
+        spdlog::warn("Raw samples size is odd, dropping last sample.");
+    }
+    size_t num_samples = raw_samples.size() / 2;
+    iq_samples.reserve(num_samples);
+
+    for (size_t i = 0; i < num_samples; ++i) {
+        float i_val = static_cast<float>(raw_samples[2 * i]) /
+                      127.0f; // Нормализуем до [-1, 1]
+        float q_val = static_cast<float>(raw_samples[2 * i + 1]) /
+                      127.0f; // Нормализуем до [-1, 1]
+        iq_samples.emplace_back(i_val, q_val);
+    }
+    return iq_samples;
+}
+
+std::vector<double> HackrfDevice::calculateMagnitudeSpectrum(
+    const std::vector<std::complex<float>> &iq_samples, int fft_size) {
+    return performFFTAndGetMagnitude(iq_samples, fft_size);
 }
