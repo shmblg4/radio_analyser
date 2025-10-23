@@ -223,3 +223,58 @@ std::vector<double> HackrfDevice::calculateMagnitudeSpectrum(
     const std::vector<std::complex<float>> &iq_samples, int fft_size) {
     return performFFTAndGetMagnitude(iq_samples, fft_size);
 }
+
+bool HackrfDevice::setCenterFreq(uint64_t center_freq) {
+    int result = hackrf_set_freq(__dev__, center_freq);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set center frequency: {}",
+                      hackrf_error_name((hackrf_error)result));
+        return false;
+    }
+    __center_freq__ = center_freq;
+    return true;
+}
+
+bool HackrfDevice::setSampleRate(double sample_rate) {
+    int result = hackrf_set_sample_rate(__dev__, sample_rate);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set sample rate: {}",
+                      hackrf_error_name((hackrf_error)result));
+        return false;
+    }
+    __sample_rate__ = sample_rate;
+    return true;
+}
+
+bool HackrfDevice::setBandwidth(uint32_t bandwidth) {
+    int result = hackrf_set_baseband_filter_bandwidth(__dev__, bandwidth);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set bandwidth: {}",
+                      hackrf_error_name((hackrf_error)result));
+        return false;
+    }
+    __bandwidth__ = bandwidth;
+    return true;
+}
+
+bool HackrfDevice::setVgaGain(uint32_t vga_gain) {
+    int result = hackrf_set_vga_gain(__dev__, vga_gain);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set VGA gain: {}",
+                      hackrf_error_name((hackrf_error)result));
+        return false;
+    }
+    __vga_gain__ = vga_gain;
+    return true;
+}
+
+bool HackrfDevice::setLnaGain(uint32_t lna_gain) {
+    int result = hackrf_set_lna_gain(__dev__, lna_gain);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set LNA gain: {}",
+                      hackrf_error_name((hackrf_error)result));
+        return false;
+    }
+    __lna_gain__ = lna_gain;
+    return true;
+}

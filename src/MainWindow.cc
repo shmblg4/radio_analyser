@@ -1,4 +1,5 @@
 #include "MainWindow.hpp"
+#include "radio_scanner.hpp"
 #include <QApplication>
 #include <QDebug>
 #include <QVBoxLayout>
@@ -7,7 +8,7 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), plot(new QCustomPlot(this)),
       spectrumUpdateTimer(new QTimer(this)), centerFreqHz(434e6),
-      sampleRateHz(2e6),
+      sampleRateHz(2e6), bandwidth(2e6), vgaGain(16), lnaGain(16),
       fftSize(512) {
 
     setCentralWidget(plot);
@@ -15,7 +16,7 @@ MainWindow::MainWindow(QWidget *parent)
     resize(800, 600);
     try {
         device = std::make_unique<HackrfDevice>();
-        if (!device->configure(centerFreqHz, sampleRateHz, 2500000, 16, 16)) {
+        if (!device->configure(centerFreqHz, sampleRateHz, bandwidth, vgaGain, lnaGain)) {
             spdlog::error("Failed to configure HackRF device.");
             return;
         }
@@ -45,6 +46,7 @@ void MainWindow::setupPlot() {
 
     double freq_resolution = sampleRateHz / fftSize;
     double start_freq_mhz = (centerFreqHz - sampleRateHz / 2.0) / 1e6;
+    double end_freq_mhz = (centerFreqHz + sampleRateHz / 2.0) / 1e6;
     x_axis_values.resize(fftSize);
     for (int i = 0; i < fftSize; ++i) {
         x_axis_values[i] = start_freq_mhz + (i * freq_resolution) / 1e6;
@@ -56,8 +58,8 @@ void MainWindow::setupPlot() {
         y[i] = -200.0;
     }
     plot->graph(0)->setData(x, y);
-
-    plot->rescaleAxes();
+    plot->yAxis->setRange(-100.0, 50.0);
+    plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
     plot->replot();
 }
 
@@ -78,6 +80,5 @@ void MainWindow::updateSpectrum() {
     }
 
     plot->graph(0)->setData(x, y);
-    plot->rescaleAxes(true);
     plot->replot();
 }

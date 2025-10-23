@@ -23,8 +23,11 @@ private:
 
     std::unique_ptr<HackrfDevice> device;
     QTimer *spectrumUpdateTimer;
-    double centerFreqHz;
+    uint32_t centerFreqHz;
     double sampleRateHz;
+    uint32_t bandwidth;
+    uint32_t vgaGain;
+    uint32_t lnaGain;
     int fftSize;
     std::vector<double> x_axis_values;
 };
