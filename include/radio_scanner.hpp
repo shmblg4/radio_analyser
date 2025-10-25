@@ -11,24 +11,24 @@
 #include <stdexcept>
 #include <vector>
 
-#define CENTER_FREQ_MHZ 434e6
-#define SAMPLE_RATE_MHZ 2e6
-#define BANDWIDTH_MHZ 2e6
-
 #include "colors.hpp"
+
+#pragma pack(push, 1)
+typedef struct hackrf_alloc_params {
+    uint64_t center_freq = 0;
+    double sample_rate = 0;
+    uint32_t bandwidth = 0;
+    uint32_t vga_gain = 0;
+    uint32_t lna_gain = 0;
+} hackrf_alloc_params;
+#pragma pack(pop)
 
 class HackrfDevice {
 public:
     HackrfDevice();
     ~HackrfDevice();
 
-    bool configure(uint64_t center_freq, double sample_rate, uint32_t bandwidth,
-                   uint32_t vga_gain, uint32_t lna_gain);
-    bool setCenterFreq(uint64_t center_freq);
-    bool setSampleRate(double sample_rate);
-    bool setBandwidth(uint32_t bandwidth);
-    bool setVgaGain(uint32_t vga_gain);
-    bool setLnaGain(uint32_t lna_gain);
+    bool configure(hackrf_alloc_params alloc_params);
 
     bool startRx();
     void stopRx();
@@ -38,11 +38,7 @@ public:
 
 private:
     hackrf_device *__dev__ = nullptr;
-    uint64_t __center_freq__ = 0;
-    double __sample_rate__ = 0;
-    uint32_t __bandwidth__ = 0;
-    uint32_t __vga_gain__ = 0;
-    uint32_t __lna_gain__ = 0;
+    hackrf_alloc_params __alloc_params__{};
 
     std::vector<int8_t> __samples_buffer__;
     std::mutex __samples_mutex__;

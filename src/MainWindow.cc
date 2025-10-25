@@ -7,8 +7,8 @@
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), plot(new QCustomPlot(this)),
-      spectrumUpdateTimer(new QTimer(this)), centerFreqHz(434e6),
-      sampleRateHz(2e6), bandwidth(2e6), vgaGain(16), lnaGain(16),
+      spectrumUpdateTimer(new QTimer(this)),
+      alloc_params({434000000, 2000000, 2000000, 16, 16}),
       fftSize(512) {
 
     setCentralWidget(plot);
@@ -16,7 +16,7 @@ MainWindow::MainWindow(QWidget *parent)
     resize(800, 600);
     try {
         device = std::make_unique<HackrfDevice>();
-        if (!device->configure(centerFreqHz, sampleRateHz, bandwidth, vgaGain, lnaGain)) {
+        if (!device->configure(alloc_params)) {
             spdlog::error("Failed to configure HackRF device.");
             return;
         }
@@ -44,9 +44,9 @@ void MainWindow::setupPlot() {
     plot->xAxis->setLabel("Frequency (MHz)");
     plot->yAxis->setLabel("Amplitude (dB)");
 
-    double freq_resolution = sampleRateHz / fftSize;
-    double start_freq_mhz = (centerFreqHz - sampleRateHz / 2.0) / 1e6;
-    double end_freq_mhz = (centerFreqHz + sampleRateHz / 2.0) / 1e6;
+    double freq_resolution = alloc_params.sample_rate / fftSize;
+    double start_freq_mhz = (alloc_params.center_freq - alloc_params.sample_rate / 2.0) / 1e6;
+    double end_freq_mhz = (alloc_params.center_freq + alloc_params.sample_rate / 2.0) / 1e6;
     x_axis_values.resize(fftSize);
     for (int i = 0; i < fftSize; ++i) {
         x_axis_values[i] = start_freq_mhz + (i * freq_resolution) / 1e6;

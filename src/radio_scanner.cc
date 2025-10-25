@@ -72,43 +72,37 @@ HackrfDevice::~HackrfDevice() {
     spdlog::info("Device closed");
 }
 
-bool HackrfDevice::configure(uint64_t center_freq, double sample_rate,
-                             uint32_t bandwidth, uint32_t vga_gain,
-                             uint32_t lna_gain) {
-    __center_freq__ = center_freq;
-    __sample_rate__ = sample_rate;
-    __bandwidth__ = bandwidth;
-    __vga_gain__ = vga_gain;
-    __lna_gain__ = lna_gain;
+bool HackrfDevice::configure(hackrf_alloc_params alloc_params) {
+   __alloc_params__ = alloc_params;
     return _configure_device();
 }
 
 bool HackrfDevice::_configure_device() {
-    auto result = hackrf_set_freq(__dev__, __center_freq__);
+    auto result = hackrf_set_freq(__dev__, __alloc_params__.center_freq);
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to set frequency: {}",
                       hackrf_error_name((hackrf_error)result));
         return false;
     }
-    result = hackrf_set_vga_gain(__dev__, __vga_gain__);
+    result = hackrf_set_vga_gain(__dev__, __alloc_params__.vga_gain);
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to set VGA gain: {}",
                       hackrf_error_name((hackrf_error)result));
         return false;
     }
-    result = hackrf_set_lna_gain(__dev__, __lna_gain__);
+    result = hackrf_set_lna_gain(__dev__, __alloc_params__.lna_gain);
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to set LNA gain: {}",
                       hackrf_error_name((hackrf_error)result));
         return false;
     }
-    result = hackrf_set_sample_rate(__dev__, __sample_rate__);
+    result = hackrf_set_sample_rate(__dev__, __alloc_params__.sample_rate);
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to set sample rate: {}",
                       hackrf_error_name((hackrf_error)result));
         return false;
     }
-    result = hackrf_set_baseband_filter_bandwidth(__dev__, __bandwidth__);
+    result = hackrf_set_baseband_filter_bandwidth(__dev__, __alloc_params__.bandwidth);
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to set bandwidth: {}",
                       hackrf_error_name((hackrf_error)result));
@@ -116,11 +110,11 @@ bool HackrfDevice::_configure_device() {
     }
     spdlog::info("{}############ Device configured ############{}",
                  colors::GREEN, colors::RESET);
-    spdlog::info("Center frequency: {} Hz", __center_freq__);
-    spdlog::info("Sample rate: {} Hz", __sample_rate__);
-    spdlog::info("Bandwidth: {} Hz", __bandwidth__);
-    spdlog::info("VGA gain: {}", __vga_gain__);
-    spdlog::info("LNA gain: {}", __lna_gain__);
+    spdlog::info("Center frequency: {} Hz", __alloc_params__.center_freq);
+    spdlog::info("Sample rate: {} Hz", __alloc_params__.sample_rate);
+    spdlog::info("Bandwidth: {} Hz", __alloc_params__.bandwidth);
+    spdlog::info("VGA gain: {}", __alloc_params__.vga_gain);
+    spdlog::info("LNA gain: {}", __alloc_params__.lna_gain);
     spdlog::info("{}###########################################{}",
                  colors::GREEN, colors::RESET);
     return true;
@@ -222,59 +216,4 @@ HackrfDevice::convertRawSamples(const std::vector<int8_t> &raw_samples) {
 std::vector<double> HackrfDevice::calculateMagnitudeSpectrum(
     const std::vector<std::complex<float>> &iq_samples, int fft_size) {
     return performFFTAndGetMagnitude(iq_samples, fft_size);
-}
-
-bool HackrfDevice::setCenterFreq(uint64_t center_freq) {
-    int result = hackrf_set_freq(__dev__, center_freq);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set center frequency: {}",
-                      hackrf_error_name((hackrf_error)result));
-        return false;
-    }
-    __center_freq__ = center_freq;
-    return true;
-}
-
-bool HackrfDevice::setSampleRate(double sample_rate) {
-    int result = hackrf_set_sample_rate(__dev__, sample_rate);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set sample rate: {}",
-                      hackrf_error_name((hackrf_error)result));
-        return false;
-    }
-    __sample_rate__ = sample_rate;
-    return true;
-}
-
-bool HackrfDevice::setBandwidth(uint32_t bandwidth) {
-    int result = hackrf_set_baseband_filter_bandwidth(__dev__, bandwidth);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set bandwidth: {}",
-                      hackrf_error_name((hackrf_error)result));
-        return false;
-    }
-    __bandwidth__ = bandwidth;
-    return true;
-}
-
-bool HackrfDevice::setVgaGain(uint32_t vga_gain) {
-    int result = hackrf_set_vga_gain(__dev__, vga_gain);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set VGA gain: {}",
-                      hackrf_error_name((hackrf_error)result));
-        return false;
-    }
-    __vga_gain__ = vga_gain;
-    return true;
-}
-
-bool HackrfDevice::setLnaGain(uint32_t lna_gain) {
-    int result = hackrf_set_lna_gain(__dev__, lna_gain);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set LNA gain: {}",
-                      hackrf_error_name((hackrf_error)result));
-        return false;
-    }
-    __lna_gain__ = lna_gain;
-    return true;
 }
