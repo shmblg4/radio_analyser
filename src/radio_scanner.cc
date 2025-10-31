@@ -205,9 +205,9 @@ HackrfDevice::convertRawSamples(const std::vector<int8_t> &raw_samples) {
 
     for (size_t i = 0; i < num_samples; ++i) {
         float i_val = static_cast<float>(raw_samples[2 * i]) /
-                      127.0f; // Нормализуем до [-1, 1]
+                      127.0f;
         float q_val = static_cast<float>(raw_samples[2 * i + 1]) /
-                      127.0f; // Нормализуем до [-1, 1]
+                      127.0f;
         iq_samples.emplace_back(i_val, q_val);
     }
     return iq_samples;

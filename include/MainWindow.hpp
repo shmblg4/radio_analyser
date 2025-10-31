@@ -49,6 +49,8 @@ private:
     QLabel *vgaLabel;
     QSlider *lnaSlider;
     QLabel *lnaLabel;
+    QComboBox *fftSizeBox;
+    QLabel *fftSizeLabel;
     QPushButton *applyButton;
 };
 

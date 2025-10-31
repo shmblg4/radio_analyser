@@ -20,8 +20,9 @@ const double DEFAULT_BANDWIDTH = 2e6;
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), plot(new QCustomPlot(this)),
       spectrumUpdateTimer(new QTimer(this)),
-      alloc_params({434000000, 2000000, 2000000, 16, 16}), fftSize(512) {
+      alloc_params({434000000, 2400000, 2000000, 16, 16}), fftSize(1024) {
 
+    this->setWindowTitle("Radio Scanner");
     controls = new QGroupBox(tr("HackRF Configuration"));
     setupControls();
 
@@ -46,6 +47,12 @@ MainWindow::MainWindow(QWidget *parent)
     lnaLayout->addWidget(lnaLabel);
     controlLayout->addWidget(new QLabel(tr("LNA Gain:")));
     controlLayout->addLayout(lnaLayout);
+
+    QHBoxLayout *fftLayout = new QHBoxLayout;
+    fftLayout->addWidget(fftSizeBox);
+    fftLayout->addWidget(fftSizeLabel);
+    controlLayout->addWidget(new QLabel(tr("FFT Size:")));
+    controlLayout->addLayout(fftLayout);
 
     controlLayout->addWidget(applyButton);
     controlLayout->addStretch();
@@ -121,9 +128,10 @@ void MainWindow::setupPlot() {
 void MainWindow::setupControls() {
     vgaLabel = new QLabel(QString::number(alloc_params.vga_gain));
     lnaLabel = new QLabel(QString::number(alloc_params.lna_gain));
+    fftSizeLabel = new QLabel(QString::number(fftSize));
 
     frequencySpinBox = new QSpinBox();
-    frequencySpinBox->setRange(433075000, 435775000);
+    frequencySpinBox->setRange(400000000, 450000000);
     frequencySpinBox->setValue(alloc_params.center_freq);
 
     sampleRateSpinBox = new QSpinBox();
@@ -141,31 +149,33 @@ void MainWindow::setupControls() {
     vgaSlider->setSingleStep(VGA_STEP);
     vgaSlider->setPageStep(VGA_STEP);
     connect(vgaSlider, &QSlider::sliderMoved, this, [this](int value) {
-        int rounded_value = ((value + VGA_STEP / 2) / VGA_STEP) *
-                            VGA_STEP;
-        rounded_value =
-            qBound(VGA_MIN, rounded_value, VGA_MAX);
-        vgaSlider->setValue(
-            rounded_value);
+        int rounded_value = ((value + VGA_STEP / 2) / VGA_STEP) * VGA_STEP;
+        rounded_value = qBound(VGA_MIN, rounded_value, VGA_MAX);
+        vgaSlider->setValue(rounded_value);
     });
     connect(vgaSlider, &QSlider::valueChanged, this,
             [this](int value) { vgaLabel->setText(QString::number(value)); });
-        
+
     lnaSlider = new QSlider(Qt::Horizontal);
     lnaSlider->setRange(LNA_MIN, LNA_MAX);
     lnaSlider->setValue(alloc_params.lna_gain);
     lnaSlider->setSingleStep(LNA_STEP);
     lnaSlider->setPageStep(LNA_STEP);
     connect(lnaSlider, &QSlider::sliderMoved, this, [this](int value) {
-        int rounded_value = ((value + LNA_STEP / 2) / LNA_STEP) *
-                            LNA_STEP;
-        rounded_value =
-            qBound(LNA_MIN, rounded_value, LNA_MAX);
-        lnaSlider->setValue(
-            rounded_value);
+        int rounded_value = ((value + LNA_STEP / 2) / LNA_STEP) * LNA_STEP;
+        rounded_value = qBound(LNA_MIN, rounded_value, LNA_MAX);
+        lnaSlider->setValue(rounded_value);
     });
     connect(lnaSlider, &QSlider::valueChanged, this,
             [this](int value) { lnaLabel->setText(QString::number(value)); });
+
+    fftSizeBox = new QComboBox();
+    fftSizeBox->addItem("512", 512);
+    fftSizeBox->addItem("1024", 1024);
+    fftSizeBox->addItem("2048", 2048);
+    fftSizeBox->addItem("4096", 4096);
+    fftSizeBox->setCurrentIndex(fftSizeBox->findText(
+        QString::number(fftSize)));
 
     applyButton = new QPushButton(tr("Apply"));
     connect(applyButton, &QPushButton::clicked, this, &MainWindow::applyConfig);
@@ -202,6 +212,8 @@ void MainWindow::applyConfig() {
     alloc_params.bandwidth = bandwidthSpinBox->value();
     alloc_params.vga_gain = vgaSlider->value();
     alloc_params.lna_gain = lnaSlider->value();
+    fftSize = fftSizeBox->currentData().toInt();
+    fftSizeLabel->setText(QString::number(fftSize));
     device->stopRx();
     bool success = device->configure(alloc_params);
 
