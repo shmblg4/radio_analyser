@@ -27,6 +27,7 @@ public:
 private slots:
     void updateSpectrum();
     void applyConfig();
+    void updateAveragePower();
 
 private:
     QWidget *centralWidget;
@@ -34,12 +35,16 @@ private:
     QCustomPlot *plot;
     void setupPlot();
     void setupControls();
+    void setupInfo();
 
     std::unique_ptr<HackrfDevice> device;
     QTimer *spectrumUpdateTimer;
+    QTimer *averagePowerLevelTimer;
     hackrf_alloc_params alloc_params;
     int fftSize;
+    double average_power;
     std::vector<double> x_axis_values;
+    std::vector<double> spectrum_db;
 
     QGroupBox *controls;
     QSpinBox *frequencySpinBox;
@@ -52,6 +57,9 @@ private:
     QComboBox *fftSizeBox;
     QLabel *fftSizeLabel;
     QPushButton *applyButton;
+
+    QGroupBox *info;
+    QLabel *averagePowerLabel;
 };
 
 #endif

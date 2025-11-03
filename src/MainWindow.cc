@@ -17,14 +17,21 @@ const double MIN_BANDWIDTH = 1e6;
 const double MAX_BANDWIDTH = 20e6;
 const double DEFAULT_BANDWIDTH = 2e6;
 
+const double MIN_FREQ = 400e6;
+const double MAX_FREQ = 450e6;
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), plot(new QCustomPlot(this)),
       spectrumUpdateTimer(new QTimer(this)),
-      alloc_params({434000000, 2400000, 2000000, 16, 16}), fftSize(1024) {
+      averagePowerLevelTimer(new QTimer(this)),
+      alloc_params({434000000, 2400000, 2000000, 16, 16}), fftSize(1024),
+      average_power(0.0) {
 
     this->setWindowTitle("Radio Scanner");
     controls = new QGroupBox(tr("HackRF Configuration"));
+    info = new QGroupBox(tr("Info"));
     setupControls();
+    setupInfo();
 
     QVBoxLayout *controlLayout = new QVBoxLayout;
     controlLayout->addWidget(new QLabel(tr("Center Frequency (Hz):")));
@@ -59,9 +66,24 @@ MainWindow::MainWindow(QWidget *parent)
     controls->setLayout(controlLayout);
     controls->setFixedWidth(300);
 
+    QVBoxLayout *infoLayout = new QVBoxLayout;
+    infoLayout->addWidget(new QLabel(tr("Average Power (dB):")));
+    infoLayout->addWidget(averagePowerLabel);
+    infoLayout->addStretch();
+    info->setLayout(infoLayout);
+    info->setFixedWidth(300);
+
+    QVBoxLayout *controlsAndInfoLayout = new QVBoxLayout;
+    controlsAndInfoLayout->addWidget(controls);
+    controlsAndInfoLayout->addWidget(info);
+    controlsAndInfoLayout->addStretch();
+    QWidget *controlsAndInfoWidget = new QWidget();
+    controlsAndInfoWidget->setLayout(controlsAndInfoLayout);
+    controlsAndInfoWidget->setFixedWidth(300);
+
     QHBoxLayout *mainLayout = new QHBoxLayout;
     mainLayout->addWidget(plot);
-    mainLayout->addWidget(controls);
+    mainLayout->addWidget(controlsAndInfoWidget);
 
     QWidget *centralWidget = new QWidget();
     centralWidget->setLayout(mainLayout);
@@ -89,6 +111,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(spectrumUpdateTimer, &QTimer::timeout, this,
             &MainWindow::updateSpectrum);
     spectrumUpdateTimer->start(50);
+    connect(averagePowerLevelTimer, &QTimer::timeout, this,
+            &MainWindow::updateAveragePower);
+    averagePowerLevelTimer->start(2000);
 }
 
 MainWindow::~MainWindow() {
@@ -131,12 +156,15 @@ void MainWindow::setupControls() {
     fftSizeLabel = new QLabel(QString::number(fftSize));
 
     frequencySpinBox = new QSpinBox();
-    frequencySpinBox->setRange(400000000, 450000000);
+    frequencySpinBox->setRange(MIN_FREQ, MAX_FREQ);
     frequencySpinBox->setValue(alloc_params.center_freq);
+    frequencySpinBox->setSuffix(" Hz");
+    frequencySpinBox->setSingleStep(25000);
 
     sampleRateSpinBox = new QSpinBox();
     sampleRateSpinBox->setRange(MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
     sampleRateSpinBox->setValue(alloc_params.sample_rate);
+    sampleRateSpinBox->setSuffix(" Hz");
 
     bandwidthSpinBox = new QSpinBox();
     bandwidthSpinBox->setRange(MIN_BANDWIDTH, MAX_BANDWIDTH);
@@ -174,18 +202,22 @@ void MainWindow::setupControls() {
     fftSizeBox->addItem("1024", 1024);
     fftSizeBox->addItem("2048", 2048);
     fftSizeBox->addItem("4096", 4096);
-    fftSizeBox->setCurrentIndex(fftSizeBox->findText(
-        QString::number(fftSize)));
+    fftSizeBox->setCurrentIndex(fftSizeBox->findData(
+        fftSize));
 
     applyButton = new QPushButton(tr("Apply"));
     connect(applyButton, &QPushButton::clicked, this, &MainWindow::applyConfig);
+}
+
+void MainWindow::setupInfo() {
+    averagePowerLabel = new QLabel(QString::number(average_power));
 }
 
 void MainWindow::updateSpectrum() {
     if (!device)
         return;
 
-    std::vector<double> spectrum_db = device->getMagnitudeSpectrum(fftSize);
+    spectrum_db = device->getMagnitudeSpectrum(fftSize);
 
     if (spectrum_db.size() != static_cast<size_t>(fftSize)) {
         return;
@@ -228,4 +260,17 @@ void MainWindow::applyConfig() {
         QMessageBox::critical(this, "Error",
                               "Failed to apply new configuration.");
     }
+}
+
+void MainWindow::updateAveragePower() {
+    if (!device || spectrum_db.empty())
+        return;
+
+    double sum = 0.0;
+    for (int i = 0; i < static_cast<int>(spectrum_db.size()); ++i) {
+        sum += spectrum_db[i];
+    }
+    average_power = sum / spectrum_db.size();
+
+    averagePowerLabel->setText(QString::number(average_power, 'f', 2));
 }
