@@ -43,6 +43,7 @@ private:
     hackrf_alloc_params alloc_params;
     int fftSize;
     double average_power;
+    int threshold;
     std::vector<double> x_axis_values;
     std::vector<double> spectrum_db;
 
@@ -56,6 +57,8 @@ private:
     QLabel *lnaLabel;
     QComboBox *fftSizeBox;
     QLabel *fftSizeLabel;
+    QSlider *thresholdSlider;
+    QLabel *thresholdLabel;
     QPushButton *applyButton;
 
     QGroupBox *info;

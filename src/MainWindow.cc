@@ -20,12 +20,16 @@ const double DEFAULT_BANDWIDTH = 2e6;
 const double MIN_FREQ = 400e6;
 const double MAX_FREQ = 450e6;
 
+const int THRESHOLD_STEP = 1;
+const int THRESHOLD_MIN = -100;
+const int THRESHOLD_MAX = 50;
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), plot(new QCustomPlot(this)),
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
       alloc_params({434000000, 2400000, 2000000, 16, 16}), fftSize(1024),
-      average_power(0.0) {
+      average_power(0.0), threshold(0) {
 
     this->setWindowTitle("Radio Scanner");
     controls = new QGroupBox(tr("HackRF Configuration"));
@@ -60,6 +64,12 @@ MainWindow::MainWindow(QWidget *parent)
     fftLayout->addWidget(fftSizeLabel);
     controlLayout->addWidget(new QLabel(tr("FFT Size:")));
     controlLayout->addLayout(fftLayout);
+
+    QHBoxLayout *thresholdLayout = new QHBoxLayout;
+    thresholdLayout->addWidget(thresholdSlider);
+    thresholdLayout->addWidget(thresholdLabel);
+    controlLayout->addWidget(new QLabel(tr("Threshold:")));
+    controlLayout->addLayout(thresholdLayout);
 
     controlLayout->addWidget(applyButton);
     controlLayout->addStretch();
@@ -124,8 +134,10 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::setupPlot() {
-    plot->addGraph();
+    plot->addGraph(); // Spectrum
+    plot->addGraph(); // Average Power Level
     plot->graph(0)->setPen(QPen(Qt::blue));
+    plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
     plot->xAxis->setLabel("Frequency (MHz)");
     plot->yAxis->setLabel("Amplitude (dB)");
 
@@ -139,12 +151,14 @@ void MainWindow::setupPlot() {
         x_axis_values[i] = start_freq_mhz + (i * freq_resolution) / 1e6;
     }
 
-    QVector<double> x(fftSize), y(fftSize);
+    QVector<double> x(fftSize), y(fftSize), y2(fftSize);
     for (int i = 0; i < fftSize; ++i) {
         x[i] = x_axis_values[i];
         y[i] = -200.0;
+        y2[i] = 0.0;
     }
     plot->graph(0)->setData(x, y);
+    plot->graph(1)->setData(x, y2);
     plot->yAxis->setRange(-100.0, 50.0);
     plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
     plot->replot();
@@ -154,6 +168,7 @@ void MainWindow::setupControls() {
     vgaLabel = new QLabel(QString::number(alloc_params.vga_gain));
     lnaLabel = new QLabel(QString::number(alloc_params.lna_gain));
     fftSizeLabel = new QLabel(QString::number(fftSize));
+    thresholdLabel = new QLabel(QString::number(threshold));
 
     frequencySpinBox = new QSpinBox();
     frequencySpinBox->setRange(MIN_FREQ, MAX_FREQ);
@@ -196,6 +211,22 @@ void MainWindow::setupControls() {
     });
     connect(lnaSlider, &QSlider::valueChanged, this,
             [this](int value) { lnaLabel->setText(QString::number(value)); });
+    
+    thresholdSlider = new QSlider(Qt::Horizontal);
+    thresholdSlider->setRange(THRESHOLD_MIN, THRESHOLD_MAX);
+    thresholdSlider->setValue(threshold);
+    thresholdSlider->setSingleStep(THRESHOLD_STEP);
+    thresholdSlider->setPageStep(THRESHOLD_STEP);
+    connect(thresholdSlider, &QSlider::sliderMoved, this, [this](int value) {
+        int rounded_value = ((value + THRESHOLD_STEP / 2) / THRESHOLD_STEP) * THRESHOLD_STEP;
+        rounded_value = qBound(THRESHOLD_MIN, rounded_value, THRESHOLD_MAX);
+        thresholdSlider->setValue(rounded_value);
+    });
+    connect(thresholdSlider, &QSlider::valueChanged, this,
+            [this](int value) { 
+                thresholdLabel->setText(QString::number(value));
+                threshold = value;
+            });
 
     fftSizeBox = new QComboBox();
     fftSizeBox->addItem("512", 512);
@@ -223,13 +254,15 @@ void MainWindow::updateSpectrum() {
         return;
     }
 
-    QVector<double> x(fftSize), y(fftSize);
+    QVector<double> x(fftSize), y(fftSize), y2(fftSize);
     for (int i = 0; i < fftSize; ++i) {
         x[i] = x_axis_values[i];
         y[i] = spectrum_db[i];
+        y2[i] = average_power + threshold;
     }
 
     plot->graph(0)->setData(x, y);
+    plot->graph(1)->setData(x, y2);
     plot->replot();
 }
 
