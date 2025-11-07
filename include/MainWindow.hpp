@@ -5,16 +5,17 @@
 #include "radio_scanner.hpp"
 #include <QApplication>
 #include <QDebug>
-#include <QMainWindow>
-#include <QTimer>
 #include <QGroupBox>
-#include <QSpinBox>
-#include <QSlider>
-#include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QPushButton>
 #include <QLabel>
+#include <QMainWindow>
 #include <QMessageBox>
+#include <QPushButton>
+#include <QSlider>
+#include <QSpinBox>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -28,24 +29,32 @@ private slots:
     void updateSpectrum();
     void applyConfig();
     void updateAveragePower();
+    void scanActive();
 
 private:
     QWidget *centralWidget;
 
     QCustomPlot *plot;
+    void configure();
     void setupPlot();
     void setupControls();
     void setupInfo();
 
     std::unique_ptr<HackrfDevice> device;
+    hackrf_alloc_params alloc_params;
+
     QTimer *spectrumUpdateTimer;
     QTimer *averagePowerLevelTimer;
-    hackrf_alloc_params alloc_params;
+    QTimer *scanActiveTimer;
+
     int fftSize;
     double average_power;
     int threshold;
+    int scan_current_start_index;
+
     std::vector<double> x_axis_values;
     std::vector<double> spectrum_db;
+    std::vector<double> windowed_samples;
 
     QGroupBox *controls;
     QSpinBox *frequencySpinBox;
@@ -63,6 +72,8 @@ private:
 
     QGroupBox *info;
     QLabel *averagePowerLabel;
+
+    std::map<int, int> WINDOW_SIZE_BY_FFTSIZE;
 };
 
 #endif

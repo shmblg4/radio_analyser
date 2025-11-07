@@ -24,12 +24,23 @@ const int THRESHOLD_STEP = 1;
 const int THRESHOLD_MIN = -100;
 const int THRESHOLD_MAX = 50;
 
+void MainWindow::configure() {
+    scan_current_start_index = 0;
+    WINDOW_SIZE_BY_FFTSIZE[512] = 6;
+    WINDOW_SIZE_BY_FFTSIZE[1024] = 13;
+    WINDOW_SIZE_BY_FFTSIZE[2048] = 26;
+    WINDOW_SIZE_BY_FFTSIZE[4096] = 51;
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), plot(new QCustomPlot(this)),
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
+      scanActiveTimer(new QTimer(this)),
       alloc_params({434000000, 2400000, 2000000, 16, 16}), fftSize(1024),
       average_power(0.0), threshold(0) {
+
+    configure();
 
     this->setWindowTitle("Radio Scanner");
     controls = new QGroupBox(tr("HackRF Configuration"));
@@ -124,6 +135,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(averagePowerLevelTimer, &QTimer::timeout, this,
             &MainWindow::updateAveragePower);
     averagePowerLevelTimer->start(2000);
+    connect(scanActiveTimer, &QTimer::timeout, this, &MainWindow::scanActive);
+    scanActiveTimer->start(2000);
 }
 
 MainWindow::~MainWindow() {
@@ -211,30 +224,29 @@ void MainWindow::setupControls() {
     });
     connect(lnaSlider, &QSlider::valueChanged, this,
             [this](int value) { lnaLabel->setText(QString::number(value)); });
-    
+
     thresholdSlider = new QSlider(Qt::Horizontal);
     thresholdSlider->setRange(THRESHOLD_MIN, THRESHOLD_MAX);
     thresholdSlider->setValue(threshold);
     thresholdSlider->setSingleStep(THRESHOLD_STEP);
     thresholdSlider->setPageStep(THRESHOLD_STEP);
     connect(thresholdSlider, &QSlider::sliderMoved, this, [this](int value) {
-        int rounded_value = ((value + THRESHOLD_STEP / 2) / THRESHOLD_STEP) * THRESHOLD_STEP;
+        int rounded_value =
+            ((value + THRESHOLD_STEP / 2) / THRESHOLD_STEP) * THRESHOLD_STEP;
         rounded_value = qBound(THRESHOLD_MIN, rounded_value, THRESHOLD_MAX);
         thresholdSlider->setValue(rounded_value);
     });
-    connect(thresholdSlider, &QSlider::valueChanged, this,
-            [this](int value) { 
-                thresholdLabel->setText(QString::number(value));
-                threshold = value;
-            });
+    connect(thresholdSlider, &QSlider::valueChanged, this, [this](int value) {
+        thresholdLabel->setText(QString::number(value));
+        threshold = value;
+    });
 
     fftSizeBox = new QComboBox();
     fftSizeBox->addItem("512", 512);
     fftSizeBox->addItem("1024", 1024);
     fftSizeBox->addItem("2048", 2048);
     fftSizeBox->addItem("4096", 4096);
-    fftSizeBox->setCurrentIndex(fftSizeBox->findData(
-        fftSize));
+    fftSizeBox->setCurrentIndex(fftSizeBox->findData(fftSize));
 
     applyButton = new QPushButton(tr("Apply"));
     connect(applyButton, &QPushButton::clicked, this, &MainWindow::applyConfig);
@@ -279,6 +291,8 @@ void MainWindow::applyConfig() {
     alloc_params.lna_gain = lnaSlider->value();
     fftSize = fftSizeBox->currentData().toInt();
     fftSizeLabel->setText(QString::number(fftSize));
+    windowed_samples.clear();
+    windowed_samples.resize(WINDOW_SIZE_BY_FFTSIZE[fftSize]);
     device->stopRx();
     bool success = device->configure(alloc_params);
 
@@ -306,4 +320,49 @@ void MainWindow::updateAveragePower() {
     average_power = sum / spectrum_db.size();
 
     averagePowerLabel->setText(QString::number(average_power, 'f', 2));
+}
+
+void MainWindow::scanActive() {
+    if (!device || spectrum_db.empty()) {
+        return;
+    }
+
+    int total_bins = static_cast<int>(spectrum_db.size());
+    int scan_window_size_bins = WINDOW_SIZE_BY_FFTSIZE[fftSize];
+
+    if (scan_window_size_bins > total_bins) {
+        spdlog::warn("Scan window size ({}) is larger than total bins ({}). "
+                     "Skipping scan.",
+                     scan_window_size_bins, total_bins);
+        scan_current_start_index = 0;
+        return;
+    }
+
+    while (scan_current_start_index + scan_window_size_bins <= total_bins) {
+        int start_idx = scan_current_start_index;
+        int end_idx = start_idx + scan_window_size_bins;
+
+        double sum_in_window = 0.0;
+        for (int i = start_idx; i < end_idx; ++i) {
+            sum_in_window += spectrum_db[i];
+        }
+        double average_in_window = sum_in_window / scan_window_size_bins;
+
+        bool activity_detected = false;
+
+        if (average_in_window > (average_power + threshold)) {
+            activity_detected = true;
+        }
+
+        if (activity_detected) {
+            spdlog::info("Activity detected in frequency {}",
+                         x_axis_values[end_idx - start_idx / 2]);
+        }
+
+        scan_current_start_index += 1;
+    }
+
+    if (scan_current_start_index + scan_window_size_bins > total_bins) {
+        scan_current_start_index = 0;
+    }
 }
