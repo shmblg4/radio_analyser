@@ -9,16 +9,16 @@
 #define VGA_MAX 62
 #define VGA_STEP 2
 
-const double MIN_SAMPLE_RATE = 2e6;
-const double MAX_SAMPLE_RATE = 20e6;
-const double DEFAULT_SAMPLE_RATE = 2e6;
+const double MIN_SAMPLE_RATE_MHZ = 2.0;
+const double MAX_SAMPLE_RATE_MHZ = 20.0;
+const double DEFAULT_SAMPLE_RATE_MHZ = 2.0;
 
-const double MIN_BANDWIDTH = 1e6;
-const double MAX_BANDWIDTH = 20e6;
-const double DEFAULT_BANDWIDTH = 2e6;
+const double MIN_BANDWIDTH_MHZ = 1.0;
+const double MAX_BANDWIDTH_MHZ = 20.0;
+const double DEFAULT_BANDWIDTH_MHZ = 2.0;
 
-const double MIN_FREQ = 400e6;
-const double MAX_FREQ = 450e6;
+const double MIN_FREQ_MHZ = 400.0;
+const double MAX_FREQ_MHZ = 450.0;
 
 const int THRESHOLD_STEP = 1;
 const int THRESHOLD_MIN = -100;
@@ -37,7 +37,11 @@ MainWindow::MainWindow(QWidget *parent)
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
       scanActiveTimer(new QTimer(this)),
-      alloc_params({434000000, 4800000, 2000000, 0, 0, 1024}), fftSize(1024),
+      alloc_params({static_cast<uint64_t>(434.125 * 1e6),
+                    static_cast<uint64_t>(4.8 * 1e6),
+                    static_cast<uint32_t>(2.0 * 1e6), 0, 0, 1024}),
+      fftSize(1024),
+      // --- КОНЕЦ ИЗМЕНЕНИЯ ---
       average_power(0.0), threshold(0) {
 
     configure();
@@ -49,13 +53,16 @@ MainWindow::MainWindow(QWidget *parent)
     setupInfo();
 
     QVBoxLayout *controlLayout = new QVBoxLayout;
-    controlLayout->addWidget(new QLabel(tr("Center Frequency (Hz):")));
+    controlLayout->addWidget(
+        new QLabel(tr("Center Frequency (MHz):")));
     controlLayout->addWidget(frequencySpinBox);
 
-    controlLayout->addWidget(new QLabel(tr("Sample Rate (Hz):")));
+    controlLayout->addWidget(
+        new QLabel(tr("Sample Rate (MS/s):")));
     controlLayout->addWidget(sampleRateSpinBox);
 
-    controlLayout->addWidget(new QLabel(tr("Bandwidth (Hz):")));
+    controlLayout->addWidget(
+        new QLabel(tr("Bandwidth (MHz):")));
     controlLayout->addWidget(bandwidthSpinBox);
 
     QHBoxLayout *vgaLayout = new QHBoxLayout;
@@ -157,14 +164,18 @@ void MainWindow::setupPlot() {
     plot->xAxis->setLabel("Frequency (MHz)");
     plot->yAxis->setLabel("Amplitude (dB)");
 
-    double freq_resolution = alloc_params.sample_rate / fftSize;
-    double start_freq_mhz =
-        (alloc_params.center_freq - alloc_params.sample_rate / 2.0) / 1e6;
-    double end_freq_mhz =
-        (alloc_params.center_freq + alloc_params.sample_rate / 2.0) / 1e6;
+    double freq_resolution_hz = alloc_params.sample_rate / fftSize;
+    double start_freq_hz =
+        (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
+    double end_freq_hz =
+        (alloc_params.center_freq + alloc_params.sample_rate / 2.0);
+    double freq_resolution_mhz = freq_resolution_hz / 1e6;
+    double start_freq_mhz = start_freq_hz / 1e6;
+    double end_freq_mhz = end_freq_hz / 1e6;
+
     x_axis_values.resize(fftSize);
     for (int i = 0; i < fftSize; ++i) {
-        x_axis_values[i] = start_freq_mhz + (i * freq_resolution) / 1e6;
+        x_axis_values[i] = start_freq_mhz + (i * freq_resolution_mhz);
     }
 
     QVector<double> x(fftSize), y(fftSize), y2(fftSize);
@@ -186,21 +197,29 @@ void MainWindow::setupControls() {
     fftSizeLabel = new QLabel(QString::number(fftSize));
     thresholdLabel = new QLabel(QString::number(threshold));
 
-    frequencySpinBox = new QSpinBox();
-    frequencySpinBox->setRange(MIN_FREQ, MAX_FREQ);
-    frequencySpinBox->setValue(alloc_params.center_freq);
-    frequencySpinBox->setSuffix(" Hz");
-    frequencySpinBox->setSingleStep(25000);
+    frequencySpinBox = new QDoubleSpinBox();
+    frequencySpinBox->setRange(MIN_FREQ_MHZ, MAX_FREQ_MHZ);
+    frequencySpinBox->setValue(alloc_params.center_freq /
+                               1e6);
+    frequencySpinBox->setSuffix(" MHz");
+    frequencySpinBox->setSingleStep(0.001);
+    frequencySpinBox->setDecimals(3);
 
-    sampleRateSpinBox = new QSpinBox();
-    sampleRateSpinBox->setRange(MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
-    sampleRateSpinBox->setValue(alloc_params.sample_rate);
-    sampleRateSpinBox->setSuffix(" Hz");
+    sampleRateSpinBox = new QDoubleSpinBox();
+    sampleRateSpinBox->setRange(MIN_SAMPLE_RATE_MHZ, MAX_SAMPLE_RATE_MHZ);
+    sampleRateSpinBox->setValue(alloc_params.sample_rate /
+                                1e6);
+    sampleRateSpinBox->setSuffix(" MS/s");
+    sampleRateSpinBox->setSingleStep(0.1);
+    sampleRateSpinBox->setDecimals(3);
 
-    bandwidthSpinBox = new QSpinBox();
-    bandwidthSpinBox->setRange(MIN_BANDWIDTH, MAX_BANDWIDTH);
-    bandwidthSpinBox->setValue(alloc_params.bandwidth);
-    bandwidthSpinBox->setSuffix(" Hz");
+    bandwidthSpinBox = new QDoubleSpinBox();
+    bandwidthSpinBox->setRange(MIN_BANDWIDTH_MHZ, MAX_BANDWIDTH_MHZ);
+    bandwidthSpinBox->setValue(alloc_params.bandwidth /
+                               1e6);
+    bandwidthSpinBox->setSuffix(" MHz");
+    bandwidthSpinBox->setSingleStep(0.1);
+    bandwidthSpinBox->setDecimals(3);
 
     vgaSlider = new QSlider(Qt::Horizontal);
     vgaSlider->setRange(VGA_MIN, VGA_MAX);
@@ -287,9 +306,12 @@ void MainWindow::applyConfig() {
         return;
     }
 
-    alloc_params.center_freq = frequencySpinBox->value();
-    alloc_params.sample_rate = sampleRateSpinBox->value();
-    alloc_params.bandwidth = bandwidthSpinBox->value();
+    alloc_params.center_freq =
+        static_cast<uint64_t>(frequencySpinBox->value() * 1e6);
+    alloc_params.sample_rate =
+        static_cast<double>(sampleRateSpinBox->value() * 1e6);
+    alloc_params.bandwidth =
+        static_cast<uint32_t>(bandwidthSpinBox->value() * 1e6);
     alloc_params.vga_gain = vgaSlider->value();
     alloc_params.lna_gain = lnaSlider->value();
     fftSize = fftSizeBox->currentData().toInt();

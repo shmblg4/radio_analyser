@@ -12,12 +12,12 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSlider>
-#include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <map>
 #include <memory>
 #include <vector>
+#include <QDoubleSpinBox>
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -57,9 +57,11 @@ private:
     std::vector<double> windowed_samples;
 
     QGroupBox *controls;
-    QSpinBox *frequencySpinBox;
-    QSpinBox *sampleRateSpinBox;
-    QSpinBox *bandwidthSpinBox;
+    // --- ИЗМЕНЕНО: QSpinBox -> QDoubleSpinBox ---
+    QDoubleSpinBox *frequencySpinBox; // Изменено
+    QDoubleSpinBox *sampleRateSpinBox; // Изменено
+    QDoubleSpinBox *bandwidthSpinBox; // Изменено
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
     QSlider *vgaSlider;
     QLabel *vgaLabel;
     QSlider *lnaSlider;
