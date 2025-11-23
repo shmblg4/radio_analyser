@@ -37,7 +37,7 @@ MainWindow::MainWindow(QWidget *parent)
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
       scanActiveTimer(new QTimer(this)),
-      alloc_params({434000000, 2400000, 2000000, 16, 16}), fftSize(1024),
+      alloc_params({434000000, 4800000, 2000000, 0, 0, 1024}), fftSize(1024),
       average_power(0.0), threshold(0) {
 
     configure();
@@ -134,9 +134,10 @@ MainWindow::MainWindow(QWidget *parent)
     spectrumUpdateTimer->start(50);
     connect(averagePowerLevelTimer, &QTimer::timeout, this,
             &MainWindow::updateAveragePower);
-    averagePowerLevelTimer->start(2000);
+    averagePowerLevelTimer->start(100);
     connect(scanActiveTimer, &QTimer::timeout, this, &MainWindow::scanActive);
-    scanActiveTimer->start(2000);
+    scanActiveTimer->start(100);
+    // scanActiveTimer->stop(); // временно
 }
 
 MainWindow::~MainWindow() {
@@ -144,6 +145,8 @@ MainWindow::~MainWindow() {
         device->stopRx();
     }
     spectrumUpdateTimer->stop();
+    averagePowerLevelTimer->stop();
+    scanActiveTimer->stop();
 }
 
 void MainWindow::setupPlot() {
@@ -260,7 +263,7 @@ void MainWindow::updateSpectrum() {
     if (!device)
         return;
 
-    spectrum_db = device->getMagnitudeSpectrum(fftSize);
+    spectrum_db = device->getMagnitudeSpectrum();
 
     if (spectrum_db.size() != static_cast<size_t>(fftSize)) {
         return;
@@ -270,7 +273,7 @@ void MainWindow::updateSpectrum() {
     for (int i = 0; i < fftSize; ++i) {
         x[i] = x_axis_values[i];
         y[i] = spectrum_db[i];
-        y2[i] = average_power + threshold;
+        y2[i] = average_power / 2 + threshold;
     }
 
     plot->graph(0)->setData(x, y);
@@ -290,6 +293,7 @@ void MainWindow::applyConfig() {
     alloc_params.vga_gain = vgaSlider->value();
     alloc_params.lna_gain = lnaSlider->value();
     fftSize = fftSizeBox->currentData().toInt();
+    alloc_params.fft_size = fftSize;
     fftSizeLabel->setText(QString::number(fftSize));
     windowed_samples.clear();
     windowed_samples.resize(WINDOW_SIZE_BY_FFTSIZE[fftSize]);
@@ -350,7 +354,7 @@ void MainWindow::scanActive() {
 
         bool activity_detected = false;
 
-        if (average_in_window > (average_power + threshold)) {
+        if (average_in_window > (average_power / 2 + threshold)) {
             activity_detected = true;
         }
 
