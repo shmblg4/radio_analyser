@@ -43,6 +43,11 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
             std::sqrt(out[i][0] * out[i][0] + out[i][1] * out[i][1]);
     }
 
+    int half_size = fft_size / 2;
+    for (int i = 0; i < half_size; ++i) {
+        std::swap(magnitudes[i], magnitudes[i + half_size]);
+    }
+
     fftw_destroy_plan(p);
     fftw_free(in);
     fftw_free(out);

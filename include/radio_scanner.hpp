@@ -37,6 +37,10 @@ public:
     std::vector<std::complex<float>> getIQSamplesForProcessing();
     std::vector<double> getMagnitudeSpectrum();
 
+    const hackrf_alloc_params &getCurrentAllocParams() const {
+        return __alloc_params__;
+    }
+
 private:
     hackrf_device *__dev__ = nullptr;
     hackrf_alloc_params __alloc_params__{};

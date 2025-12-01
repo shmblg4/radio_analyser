@@ -14,10 +14,20 @@
 #include <QSlider>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QDoubleSpinBox>
+#include <QComboBox>
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
+#include <QActionGroup>
+#include <QIODevice>
+#include <QByteArray>
 #include <map>
 #include <memory>
 #include <vector>
-#include <QDoubleSpinBox>
+
+class QAudioFormat;
+class QAudioSink;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -32,13 +42,24 @@ private slots:
     void scanActive();
 
 private:
+    enum class ViewMode {
+        SpectrumOverview,
+        Listening
+    };
+
     QWidget *centralWidget;
+
+    ViewMode currentMode;
 
     QCustomPlot *plot;
     void configure();
     void setupPlot();
     void setupControls();
     void setupInfo();
+    void setupMenu();
+    void applyCurrentModeLayout();
+    void updateListeningParameterControls();
+    void setupVolumeSliderConnection();
 
     std::unique_ptr<HackrfDevice> device;
     hackrf_alloc_params alloc_params;
@@ -57,11 +78,10 @@ private:
     std::vector<double> windowed_samples;
 
     QGroupBox *controls;
-    // --- ИЗМЕНЕНО: QSpinBox -> QDoubleSpinBox ---
-    QDoubleSpinBox *frequencySpinBox; // Изменено
-    QDoubleSpinBox *sampleRateSpinBox; // Изменено
-    QDoubleSpinBox *bandwidthSpinBox; // Изменено
-    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+    QWidget *controlsAndInfoWidget;
+    QDoubleSpinBox *frequencySpinBox;
+    QDoubleSpinBox *sampleRateSpinBox;
+    QDoubleSpinBox *bandwidthSpinBox;
     QSlider *vgaSlider;
     QLabel *vgaLabel;
     QSlider *lnaSlider;
@@ -71,11 +91,30 @@ private:
     QSlider *thresholdSlider;
     QLabel *thresholdLabel;
     QPushButton *applyButton;
+    QPushButton *backToOverviewButton;
+    QPushButton *listenToggleButton;
+    QSlider *volumeSlider;
 
     QGroupBox *info;
     QLabel *averagePowerLabel;
 
     std::map<int, int> WINDOW_SIZE_BY_FFTSIZE;
+
+    QAction *spectrumOverviewAction;
+    QAction *listeningModeAction;
+
+    bool listeningActive = false;
+    QTimer *audioTimer = nullptr;
+    QAudioSink *audioSink = nullptr;
+    QIODevice *audioIODevice = nullptr;
+    QByteArray audioBuffer;
+    int audioSampleRate = 48000;
+
+private slots:
+    void setSpectrumOverviewMode();
+    void setListeningMode();
+    void toggleListening();
+    void processAudio();
 };
 
 #endif
