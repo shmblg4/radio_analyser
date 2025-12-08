@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 #include "MainWindowConstants.hpp"
 #include <QMessageBox>
+#include <QSignalBlocker>
 
 void MainWindow::configure() {
     scan_current_start_index = 0;
@@ -11,12 +12,17 @@ void MainWindow::configure() {
 }
 
 void MainWindow::setupPlot() {
-    plot->addGraph();
-    plot->addGraph();
-    plot->graph(0)->setPen(QPen(Qt::blue));
-    plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
-    plot->xAxis->setLabel("Frequency (MHz)");
-    plot->yAxis->setLabel("Amplitude (dB)");
+    plot->clearPlottables();
+    plot->clearGraphs();
+    plot->clearItems();
+
+    if (waterfallColorScale) {
+        plot->plotLayout()->remove(waterfallColorScale);
+        waterfallColorScale->deleteLater();
+        waterfallColorScale = nullptr;
+        plot->plotLayout()->simplify();
+    }
+    waterfallMap = nullptr;
 
     double freq_resolution_hz = alloc_params.sample_rate / fftSize;
     double start_freq_hz =
@@ -32,16 +38,49 @@ void MainWindow::setupPlot() {
         x_axis_values[i] = start_freq_mhz + (i * freq_resolution_mhz);
     }
 
-    QVector<double> x(fftSize), y(fftSize), y2(fftSize);
-    for (int i = 0; i < fftSize; ++i) {
-        x[i] = x_axis_values[i];
-        y[i] = -200.0;
-        y2[i] = 0.0;
+    if (currentPlotMode == PlotMode::Spectrum) {
+        plot->addGraph();
+        plot->addGraph();
+        plot->graph(0)->setPen(QPen(Qt::blue));
+        plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
+        plot->xAxis->setLabel("Frequency (MHz)");
+        plot->yAxis->setLabel("Amplitude (dB)");
+
+        QVector<double> x(fftSize), y(fftSize), y2(fftSize);
+        for (int i = 0; i < fftSize; ++i) {
+            x[i] = x_axis_values[i];
+            y[i] = -200.0;
+            y2[i] = 0.0;
+        }
+        plot->graph(0)->setData(x, y);
+        plot->graph(1)->setData(x, y2);
+        plot->yAxis->setRange(-100.0, 50.0);
+        plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
+    } else {
+        waterfallMap = new QCPColorMap(plot->xAxis, plot->yAxis);
+        waterfallColorScale = new QCPColorScale(plot);
+        plot->plotLayout()->addElement(0, 1, waterfallColorScale);
+        waterfallColorScale->setType(QCPAxis::atRight);
+        waterfallMap->setColorScale(waterfallColorScale);
+        waterfallMap->setInterpolate(false);
+        waterfallMap->setGradient(QCPColorGradient::gpThermal);
+
+        QCPColorMapData *data = waterfallMap->data();
+        data->setSize(fftSize, waterfallHistorySize);
+        data->setKeyRange(QCPRange(start_freq_mhz, end_freq_mhz));
+        data->setValueRange(QCPRange(0, waterfallHistorySize));
+        for (int j = 0; j < waterfallHistorySize; ++j) {
+            for (int i = 0; i < fftSize; ++i) {
+                data->setCell(i, j, -200.0);
+            }
+        }
+
+        plot->xAxis->setLabel("Frequency (MHz)");
+        plot->yAxis->setLabel("Frame");
+        plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
+        plot->yAxis->setRange(0, waterfallHistorySize);
     }
-    plot->graph(0)->setData(x, y);
-    plot->graph(1)->setData(x, y2);
-    plot->yAxis->setRange(-100.0, 50.0);
-    plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
+
     plot->replot();
 }
 
@@ -154,6 +193,22 @@ void MainWindow::setupMenu() {
             &MainWindow::setListeningMode);
 }
 
+void MainWindow::setupToolbar() {
+    if (!viewToolBar) {
+        viewToolBar = addToolBar(tr("График"));
+        viewToolBar->setMovable(false);
+    }
+
+    if (!plotModeAction) {
+        plotModeAction = viewToolBar->addAction(tr("Режим: Спектр"));
+        plotModeAction->setCheckable(true);
+        connect(plotModeAction, &QAction::triggered, this,
+                &MainWindow::toggleDisplayMode);
+    }
+
+    updateDisplayModeControls();
+}
+
 void MainWindow::applyCurrentModeLayout() {
     if (!centralWidget) {
         return;
@@ -229,6 +284,18 @@ void MainWindow::applyCurrentModeLayout() {
     }
 }
 
+void MainWindow::updateDisplayModeControls() {
+    const QString text = currentPlotMode == PlotMode::Spectrum
+                             ? tr("Режим: Спектр")
+                             : tr("Режим: Waterfall");
+
+    if (plotModeAction) {
+        const QSignalBlocker blocker(plotModeAction);
+        plotModeAction->setText(text);
+        plotModeAction->setChecked(currentPlotMode == PlotMode::Waterfall);
+    }
+}
+
 void MainWindow::updateListeningParameterControls() {
     bool enabled = !listeningActive;
     if (frequencySpinBox)
@@ -240,4 +307,3 @@ void MainWindow::updateListeningParameterControls() {
     if (applyButton)
         applyButton->setEnabled(enabled);
 }
-

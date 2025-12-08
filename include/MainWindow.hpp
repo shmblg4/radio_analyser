@@ -22,6 +22,9 @@
 #include <QActionGroup>
 #include <QIODevice>
 #include <QByteArray>
+#include <QToolBar>
+#include <QPointer>
+#include <deque>
 #include <map>
 #include <memory>
 #include <vector>
@@ -46,20 +49,26 @@ private:
         SpectrumOverview,
         Listening
     };
+    enum class PlotMode { Spectrum, Waterfall };
 
     QWidget *centralWidget;
 
     ViewMode currentMode;
+    PlotMode currentPlotMode = PlotMode::Spectrum;
 
     QCustomPlot *plot;
+    QPointer<QCPColorMap> waterfallMap = nullptr;
+    QPointer<QCPColorScale> waterfallColorScale = nullptr;
     void configure();
     void setupPlot();
     void setupControls();
     void setupInfo();
     void setupMenu();
+    void setupToolbar();
     void applyCurrentModeLayout();
     void updateListeningParameterControls();
     void setupVolumeSliderConnection();
+    void updateDisplayModeControls();
 
     std::unique_ptr<HackrfDevice> device;
     hackrf_alloc_params alloc_params;
@@ -76,6 +85,8 @@ private:
     std::vector<double> x_axis_values;
     std::vector<double> spectrum_db;
     std::vector<double> windowed_samples;
+    std::deque<QVector<double>> waterfallHistory;
+    int waterfallHistorySize = 200;
 
     QGroupBox *controls;
     QWidget *controlsAndInfoWidget;
@@ -102,6 +113,8 @@ private:
 
     QAction *spectrumOverviewAction;
     QAction *listeningModeAction;
+    QAction *plotModeAction = nullptr;
+    QToolBar *viewToolBar = nullptr;
 
     bool listeningActive = false;
     QTimer *audioTimer = nullptr;
@@ -115,6 +128,7 @@ private slots:
     void setListeningMode();
     void toggleListening();
     void processAudio();
+    void toggleDisplayMode();
 };
 
 #endif

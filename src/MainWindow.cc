@@ -1,6 +1,5 @@
 #include "MainWindow.hpp"
 #include "radio_scanner.hpp"
-#include "MainWindowConstants.hpp"
 
 #ifdef HAVE_QT_AUDIO
 #include <QtMultimedia/QAudioFormat>
@@ -9,6 +8,8 @@
 
 #include <QMessageBox>
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <limits>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
@@ -26,7 +27,9 @@ MainWindow::MainWindow(QWidget *parent)
       threshold(0),
       backToOverviewButton(nullptr),
       listenToggleButton(nullptr),
-      volumeSlider(nullptr) {
+      volumeSlider(nullptr),
+      plotModeAction(nullptr),
+      viewToolBar(nullptr) {
 
     configure();
 
@@ -110,6 +113,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(audioTimer, &QTimer::timeout, this, &MainWindow::processAudio);
 
     setupMenu();
+    setupToolbar();
 
     setCentralWidget(centralWidget);
     applyCurrentModeLayout();
@@ -165,39 +169,100 @@ void MainWindow::updateSpectrum() {
     static double last_sample_rate = 0.0;
     static uint64_t last_center_freq = 0;
     static int last_fft_size = 0;
-    
-    if (alloc_params.sample_rate != last_sample_rate || 
+
+    double freq_resolution_hz = alloc_params.sample_rate / fftSize;
+    double start_freq_hz =
+        (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
+    double end_freq_hz =
+        (alloc_params.center_freq + alloc_params.sample_rate / 2.0);
+    double freq_resolution_mhz = freq_resolution_hz / 1e6;
+    double start_freq_mhz = start_freq_hz / 1e6;
+    double end_freq_mhz = end_freq_hz / 1e6;
+
+    if (alloc_params.sample_rate != last_sample_rate ||
         alloc_params.center_freq != last_center_freq ||
         fftSize != last_fft_size) {
-        double freq_resolution_hz = alloc_params.sample_rate / fftSize;
-        double start_freq_hz =
-            (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
-        double freq_resolution_mhz = freq_resolution_hz / 1e6;
-        double start_freq_mhz = start_freq_hz / 1e6;
+        waterfallHistory.clear();
 
         x_axis_values.resize(fftSize);
         for (int i = 0; i < fftSize; ++i) {
             x_axis_values[i] = start_freq_mhz + (i * freq_resolution_mhz);
         }
-        
-        double end_freq_mhz = (alloc_params.center_freq + alloc_params.sample_rate / 2.0) / 1e6;
+
         plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
-        
+
         last_sample_rate = alloc_params.sample_rate;
         last_center_freq = alloc_params.center_freq;
         last_fft_size = fftSize;
     }
 
-    QVector<double> x(fftSize), y(fftSize), y2(fftSize);
-    for (int i = 0; i < fftSize; ++i) {
-        x[i] = x_axis_values[i];
-        y[i] = spectrum_db[i];
-        y2[i] = average_power / 2 + threshold;
-    }
+    if (currentPlotMode == PlotMode::Spectrum) {
+        if (plot->graphCount() < 2) {
+            setupPlot();
+            return;
+        }
 
-    plot->graph(0)->setData(x, y);
-    plot->graph(1)->setData(x, y2);
-    plot->replot();
+        QVector<double> x(fftSize), y(fftSize), y2(fftSize);
+        for (int i = 0; i < fftSize; ++i) {
+            x[i] = x_axis_values[i];
+            y[i] = spectrum_db[i];
+            y2[i] = average_power / 2 + threshold;
+        }
+
+        plot->graph(0)->setData(x, y);
+        plot->graph(1)->setData(x, y2);
+        plot->replot();
+    } else {
+        QVector<double> line(fftSize);
+        double minVal = std::numeric_limits<double>::max();
+        double maxVal = std::numeric_limits<double>::lowest();
+        for (int i = 0; i < fftSize; ++i) {
+            line[i] = spectrum_db[i];
+            minVal = std::min(minVal, line[i]);
+            maxVal = std::max(maxVal, line[i]);
+        }
+
+        waterfallHistory.push_back(std::move(line));
+        if (static_cast<int>(waterfallHistory.size()) > waterfallHistorySize) {
+            waterfallHistory.pop_front();
+        }
+
+        if (!waterfallMap) {
+            setupPlot();
+            return;
+        }
+
+        if (waterfallMap && waterfallMap->data()) {
+            QCPColorMapData *data = waterfallMap->data();
+            data->setSize(fftSize, waterfallHistorySize);
+            data->setKeyRange(QCPRange(start_freq_mhz, end_freq_mhz));
+            data->setValueRange(QCPRange(0, waterfallHistorySize));
+
+            const int rows = static_cast<int>(waterfallHistory.size());
+            for (int j = 0; j < waterfallHistorySize; ++j) {
+                int srcIndex = rows - 1 - j;
+                const QVector<double> *rowPtr =
+                    (srcIndex >= 0 && srcIndex < rows)
+                        ? &waterfallHistory[static_cast<size_t>(srcIndex)]
+                        : nullptr;
+                for (int i = 0; i < fftSize; ++i) {
+                    const bool hasRow = rowPtr && i < rowPtr->size();
+                    const double v = hasRow
+                                         ? (*rowPtr)[i]
+                                         : (minVal == std::numeric_limits<
+                                                             double>::max()
+                                                ? -200.0
+                                                : minVal);
+                    data->setCell(i, j, v);
+                }
+            }
+
+            if (waterfallColorScale) {
+                waterfallColorScale->setDataRange(QCPRange(minVal, maxVal));
+            }
+            plot->replot();
+        }
+    }
 }
 
 void MainWindow::applyConfig() {
@@ -219,6 +284,7 @@ void MainWindow::applyConfig() {
     fftSizeLabel->setText(QString::number(fftSize));
     windowed_samples.clear();
     windowed_samples.resize(WINDOW_SIZE_BY_FFTSIZE[fftSize]);
+    waterfallHistory.clear();
     device->stopRx();
     bool success = device->configure(alloc_params);
 
@@ -246,6 +312,17 @@ void MainWindow::updateAveragePower() {
     average_power = sum / spectrum_db.size();
 
     averagePowerLabel->setText(QString::number(average_power, 'f', 2));
+}
+
+void MainWindow::toggleDisplayMode() {
+    currentPlotMode = currentPlotMode == PlotMode::Spectrum
+                          ? PlotMode::Waterfall
+                          : PlotMode::Spectrum;
+
+    waterfallHistory.clear();
+
+    updateDisplayModeControls();
+    setupPlot();
 }
 
 void MainWindow::setSpectrumOverviewMode() {
