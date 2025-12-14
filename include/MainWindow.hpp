@@ -31,6 +31,7 @@
 
 class QAudioFormat;
 class QAudioSink;
+class AudioProcessorThread;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -45,15 +46,10 @@ private slots:
     void scanActive();
 
 private:
-    enum class ViewMode {
-        SpectrumOverview,
-        Listening
-    };
     enum class PlotMode { Spectrum, Waterfall };
 
     QWidget *centralWidget;
 
-    ViewMode currentMode;
     PlotMode currentPlotMode = PlotMode::Spectrum;
 
     QCustomPlot *plot;
@@ -63,9 +59,8 @@ private:
     void setupPlot();
     void setupControls();
     void setupInfo();
-    void setupMenu();
     void setupToolbar();
-    void applyCurrentModeLayout();
+    void setupLayout();
     void updateListeningParameterControls();
     void setupVolumeSliderConnection();
     void updateDisplayModeControls();
@@ -102,17 +97,17 @@ private:
     QSlider *thresholdSlider;
     QLabel *thresholdLabel;
     QPushButton *applyButton;
-    QPushButton *backToOverviewButton;
     QPushButton *listenToggleButton;
     QSlider *volumeSlider;
+    QLabel *volumeLabel;
+    QLabel *listeningStatusLabel;
+    QLabel *listeningFrequencyLabel;
 
     QGroupBox *info;
     QLabel *averagePowerLabel;
 
     std::map<int, int> WINDOW_SIZE_BY_FFTSIZE;
 
-    QAction *spectrumOverviewAction;
-    QAction *listeningModeAction;
     QAction *plotModeAction = nullptr;
     QToolBar *viewToolBar = nullptr;
 
@@ -122,13 +117,14 @@ private:
     QIODevice *audioIODevice = nullptr;
     QByteArray audioBuffer;
     int audioSampleRate = 48000;
+    AudioProcessorThread *audioProcessorThread = nullptr;
 
 private slots:
-    void setSpectrumOverviewMode();
-    void setListeningMode();
     void toggleListening();
     void processAudio();
+    void onAudioSamplesReady(const std::vector<int16_t> &samples);
     void toggleDisplayMode();
+    void updateListeningStatus();
 };
 
 #endif

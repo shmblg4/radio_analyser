@@ -168,31 +168,6 @@ void MainWindow::setupInfo() {
     averagePowerLabel = new QLabel(QString::number(average_power));
 }
 
-void MainWindow::setupMenu() {
-    QMenu *viewMenu = menuBar()->addMenu(tr("Вид"));
-
-    spectrumOverviewAction = new QAction(tr("Обзор спектра"), this);
-    listeningModeAction = new QAction(tr("Прослушивание"), this);
-
-    spectrumOverviewAction->setCheckable(true);
-    listeningModeAction->setCheckable(true);
-
-    QActionGroup *viewGroup = new QActionGroup(this);
-    viewGroup->addAction(spectrumOverviewAction);
-    viewGroup->addAction(listeningModeAction);
-    viewGroup->setExclusive(true);
-
-    spectrumOverviewAction->setChecked(true);
-
-    viewMenu->addAction(spectrumOverviewAction);
-    viewMenu->addAction(listeningModeAction);
-
-    connect(spectrumOverviewAction, &QAction::triggered, this,
-            &MainWindow::setSpectrumOverviewMode);
-    connect(listeningModeAction, &QAction::triggered, this,
-            &MainWindow::setListeningMode);
-}
-
 void MainWindow::setupToolbar() {
     if (!viewToolBar) {
         viewToolBar = addToolBar(tr("График"));
@@ -209,7 +184,7 @@ void MainWindow::setupToolbar() {
     updateDisplayModeControls();
 }
 
-void MainWindow::applyCurrentModeLayout() {
+void MainWindow::setupLayout() {
     if (!centralWidget) {
         return;
     }
@@ -225,63 +200,69 @@ void MainWindow::applyCurrentModeLayout() {
         delete oldLayout;
     }
 
-    if (currentMode == ViewMode::SpectrumOverview) {
-        QVBoxLayout *controlsAndInfoLayout = new QVBoxLayout;
-        controlsAndInfoLayout->addWidget(controls);
-        controlsAndInfoLayout->addWidget(info);
-        controlsAndInfoLayout->addStretch();
-
-        QWidget *controlsAndInfoWidget = new QWidget(this);
-        controlsAndInfoWidget->setLayout(controlsAndInfoLayout);
-        controlsAndInfoWidget->setFixedWidth(300);
-
-        if (backToOverviewButton) {
-            backToOverviewButton->hide();
-        }
-
-        QHBoxLayout *mainLayout = new QHBoxLayout;
-        mainLayout->addWidget(plot);
-        mainLayout->addWidget(controlsAndInfoWidget);
-        centralWidget->setLayout(mainLayout);
-    } else {
-        if (!backToOverviewButton) {
-            backToOverviewButton =
-                new QPushButton(tr("Вернуться к обзору"), this);
-            connect(backToOverviewButton, &QPushButton::clicked, this,
-                    &MainWindow::setSpectrumOverviewMode);
-        }
-
-        if (!listenToggleButton) {
-            listenToggleButton =
-                new QPushButton(tr("Старт прослушивания"), this);
-            connect(listenToggleButton, &QPushButton::clicked, this,
-                    &MainWindow::toggleListening);
-        }
-
-        if (!volumeSlider) {
-            volumeSlider = new QSlider(Qt::Horizontal, this);
-            volumeSlider->setRange(0, 100);
-            volumeSlider->setValue(50);
-            setupVolumeSliderConnection();
-        }
-
-        QVBoxLayout *listeningLayout = new QVBoxLayout;
-        listeningLayout->addWidget(plot, 1);
-        listeningLayout->addWidget(backToOverviewButton, 0, Qt::AlignRight);
-
-        QHBoxLayout *listenControlsLayout = new QHBoxLayout;
-        listenControlsLayout->addWidget(listenToggleButton);
-        listenControlsLayout->addWidget(new QLabel(tr("Громкость:"), this));
-        listenControlsLayout->addWidget(volumeSlider);
-        listeningLayout->addLayout(listenControlsLayout);
-
-        listeningLayout->addWidget(controls);
-
-        centralWidget->setLayout(listeningLayout);
-        backToOverviewButton->show();
-
-        updateListeningParameterControls();
+    if (!listenToggleButton) {
+        listenToggleButton =
+            new QPushButton(tr("Старт прослушивания"), this);
+        connect(listenToggleButton, &QPushButton::clicked, this,
+                &MainWindow::toggleListening);
     }
+
+    if (!volumeSlider) {
+        volumeSlider = new QSlider(Qt::Horizontal, this);
+        volumeSlider->setRange(0, 100);
+        volumeSlider->setValue(50);
+        setupVolumeSliderConnection();
+    }
+
+    if (!volumeLabel) {
+        volumeLabel = new QLabel("50%", this);
+        volumeLabel->setMinimumWidth(50);
+        volumeLabel->setAlignment(Qt::AlignCenter);
+    }
+
+    if (!listeningStatusLabel) {
+        listeningStatusLabel = new QLabel(tr("Статус: Остановлено"), this);
+        listeningStatusLabel->setStyleSheet("font-weight: bold; color: #d32f2f;");
+    }
+
+    if (!listeningFrequencyLabel) {
+        listeningFrequencyLabel = new QLabel(tr("Частота: -- MHz"), this);
+    }
+
+    QGroupBox *listeningInfoGroup = new QGroupBox(tr("Прослушивание"), this);
+    QVBoxLayout *listeningInfoLayout = new QVBoxLayout;
+    
+    listeningInfoLayout->addWidget(listeningStatusLabel);
+    listeningInfoLayout->addWidget(listeningFrequencyLabel);
+    listeningInfoLayout->addWidget(listenToggleButton);
+    listeningInfoLayout->addWidget(new QLabel(tr("Громкость:"), this));
+    QHBoxLayout *volumeLayout = new QHBoxLayout;
+    volumeLayout->addWidget(volumeSlider);
+    volumeLayout->addWidget(volumeLabel);
+    listeningInfoLayout->addLayout(volumeLayout);
+    
+    listeningInfoLayout->addStretch();
+    listeningInfoGroup->setLayout(listeningInfoLayout);
+    listeningInfoGroup->setFixedWidth(300);
+
+    QVBoxLayout *rightPanelLayout = new QVBoxLayout;
+    rightPanelLayout->addWidget(listeningInfoGroup);
+    rightPanelLayout->addWidget(controls);
+    rightPanelLayout->addWidget(info);
+    rightPanelLayout->addStretch();
+
+    QWidget *rightPanelWidget = new QWidget(this);
+    rightPanelWidget->setLayout(rightPanelLayout);
+    rightPanelWidget->setFixedWidth(300);
+
+    QHBoxLayout *mainLayout = new QHBoxLayout;
+    mainLayout->addWidget(plot);
+    mainLayout->addWidget(rightPanelWidget);
+
+    centralWidget->setLayout(mainLayout);
+
+    updateListeningParameterControls();
+    updateListeningStatus();
 }
 
 void MainWindow::updateDisplayModeControls() {

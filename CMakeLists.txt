@@ -19,7 +19,10 @@ link_directories(/usr/local/lib)
 set(SOURCES main.cc)
 file(GLOB_RECURSE SRC_FILES ${PROJECT_SOURCE_DIR}/src/*.cc)
 
-add_executable(radio_analyser include/MainWindow.hpp ${SOURCES} ${SRC_FILES})
+add_executable(
+    radio_analyser 
+    include/MainWindow.hpp 
+    include/AudioProcessorThread.hpp ${SOURCES} ${SRC_FILES})
 
 find_package(spdlog REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport)

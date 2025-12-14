@@ -1,5 +1,6 @@
 #include "MainWindow.hpp"
 #include "radio_scanner.hpp"
+#include "AudioProcessorThread.hpp"
 
 #ifdef HAVE_QT_AUDIO
 #include <QtMultimedia/QAudioFormat>
@@ -14,7 +15,6 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       centralWidget(new QWidget(this)),
-      currentMode(ViewMode::SpectrumOverview),
       plot(new QCustomPlot(this)),
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
@@ -25,9 +25,11 @@ MainWindow::MainWindow(QWidget *parent)
       fftSize(1024),
       average_power(0.0),
       threshold(0),
-      backToOverviewButton(nullptr),
       listenToggleButton(nullptr),
       volumeSlider(nullptr),
+      volumeLabel(nullptr),
+      listeningStatusLabel(nullptr),
+      listeningFrequencyLabel(nullptr),
       plotModeAction(nullptr),
       viewToolBar(nullptr) {
 
@@ -101,8 +103,8 @@ MainWindow::MainWindow(QWidget *parent)
         if (!audioIODevice) {
             spdlog::warn("Failed to start audio output device");
         } else {
-            spdlog::info("Audio output initialized: {} Hz, {} channels", 
-                        format.sampleRate(), format.channelCount());
+            spdlog::info("Audio output initialized: {} Hz, {} channels, volume: {}", 
+                        format.sampleRate(), format.channelCount(), audioSink->volume());
         }
     } else {
         spdlog::warn("Failed to create QAudioSink");
@@ -112,11 +114,25 @@ MainWindow::MainWindow(QWidget *parent)
     audioTimer = new QTimer(this);
     connect(audioTimer, &QTimer::timeout, this, &MainWindow::processAudio);
 
-    setupMenu();
+#ifdef HAVE_QT_AUDIO
+    audioProcessorThread = new AudioProcessorThread(this);
+    connect(audioProcessorThread, &AudioProcessorThread::audioSamplesReady,
+            this, &MainWindow::onAudioSamplesReady);
+    audioProcessorThread->start();
+#endif
+
     setupToolbar();
 
     setCentralWidget(centralWidget);
-    applyCurrentModeLayout();
+    setupLayout();
+    
+#ifdef HAVE_QT_AUDIO
+    if (volumeSlider && audioSink) {
+        int volumeValue = volumeSlider->value();
+        audioSink->setVolume(volumeValue / 100.0f);
+        spdlog::info("Initial volume set to: {}%", volumeValue);
+    }
+#endif
 
     setupPlot();
     resize(1000, 600);
@@ -154,6 +170,12 @@ MainWindow::~MainWindow() {
     spectrumUpdateTimer->stop();
     averagePowerLevelTimer->stop();
     scanActiveTimer->stop();
+#ifdef HAVE_QT_AUDIO
+    if (audioProcessorThread) {
+        audioProcessorThread->stopProcessing();
+        audioProcessorThread->wait();
+    }
+#endif
 }
 
 void MainWindow::updateSpectrum() {
@@ -325,38 +347,6 @@ void MainWindow::toggleDisplayMode() {
     setupPlot();
 }
 
-void MainWindow::setSpectrumOverviewMode() {
-    if (currentMode == ViewMode::SpectrumOverview) {
-        return;
-    }
-    currentMode = ViewMode::SpectrumOverview;
-    listeningActive = false;
-    if (audioTimer)
-        audioTimer->stop();
-    if (listenToggleButton)
-        listenToggleButton->setText(tr("Старт прослушивания"));
-    if (spectrumOverviewAction) {
-        spectrumOverviewAction->setChecked(true);
-    }
-    if (listeningModeAction) {
-        listeningModeAction->setChecked(false);
-    }
-    applyCurrentModeLayout();
-}
-
-void MainWindow::setListeningMode() {
-    if (currentMode == ViewMode::Listening) {
-        return;
-    }
-    currentMode = ViewMode::Listening;
-    if (spectrumOverviewAction) {
-        spectrumOverviewAction->setChecked(false);
-    }
-    if (listeningModeAction) {
-        listeningModeAction->setChecked(true);
-    }
-    applyCurrentModeLayout();
-}
 
 void MainWindow::scanActive() {
     if (!device || spectrum_db.empty()) {
@@ -406,12 +396,26 @@ void MainWindow::scanActive() {
 void MainWindow::setupVolumeSliderConnection() {
 #ifdef HAVE_QT_AUDIO
     if (volumeSlider) {
+        disconnect(volumeSlider, &QSlider::valueChanged, this, nullptr);
+        
         connect(volumeSlider, &QSlider::valueChanged, this,
                 [this](int value) {
                     if (audioSink) {
-                        audioSink->setVolume(value / 100.0);
+                        float volume = value / 100.0f;
+                        audioSink->setVolume(volume);
+                        spdlog::debug("Volume set to: {}% ({})", value, volume);
+                    } else {
+                        spdlog::warn("Cannot set volume: audioSink is null");
+                    }
+                    if (volumeLabel) {
+                        volumeLabel->setText(QString("%1%").arg(value));
                     }
                 });
+        
+        if (audioSink) {
+            int currentValue = volumeSlider->value();
+            audioSink->setVolume(currentValue / 100.0f);
+        }
     }
 #endif
 }
