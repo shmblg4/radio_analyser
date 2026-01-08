@@ -20,6 +20,7 @@ typedef struct hackrf_alloc_params {
     uint32_t bandwidth = 0;
     uint32_t vga_gain = 0;
     uint32_t lna_gain = 0;
+    uint16_t fft_size = 0;
 } hackrf_alloc_params;
 #pragma pack(pop)
 
@@ -34,7 +35,11 @@ public:
     void stopRx();
 
     std::vector<std::complex<float>> getIQSamplesForProcessing();
-    std::vector<double> getMagnitudeSpectrum(int fft_size = 512);
+    std::vector<double> getMagnitudeSpectrum();
+
+    const hackrf_alloc_params &getCurrentAllocParams() const {
+        return __alloc_params__;
+    }
 
 private:
     hackrf_device *__dev__ = nullptr;

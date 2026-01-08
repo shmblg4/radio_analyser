@@ -43,6 +43,11 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
             std::sqrt(out[i][0] * out[i][0] + out[i][1] * out[i][1]);
     }
 
+    int half_size = fft_size / 2;
+    for (int i = 0; i < half_size; ++i) {
+        std::swap(magnitudes[i], magnitudes[i + half_size]);
+    }
+
     fftw_destroy_plan(p);
     fftw_free(in);
     fftw_free(out);
@@ -178,16 +183,16 @@ std::vector<std::complex<float>> HackrfDevice::getIQSamplesForProcessing() {
     return iq_samples;
 }
 
-std::vector<double> HackrfDevice::getMagnitudeSpectrum(int fft_size) {
+std::vector<double> HackrfDevice::getMagnitudeSpectrum() {
     auto iq_samples = getIQSamplesForProcessing();
     if (iq_samples.empty()) {
-        return std::vector<double>(fft_size, -200.0);
+        return std::vector<double>(__alloc_params__.fft_size, -200.0);
     }
     std::vector<double> magnitudes =
-        calculateMagnitudeSpectrum(iq_samples, fft_size);
+        calculateMagnitudeSpectrum(iq_samples, __alloc_params__.fft_size);
 
-    std::vector<double> spectrum_db(fft_size);
-    for (int i = 0; i < fft_size; ++i) {
+    std::vector<double> spectrum_db(__alloc_params__.fft_size);
+    for (int i = 0; i < __alloc_params__.fft_size; ++i) {
         double magnitude = magnitudes[i];
         spectrum_db[i] = 20.0 * std::log10(magnitude + 1e-10);
     }

@@ -1,35 +1,39 @@
 #include "MainWindow.hpp"
 #include "radio_scanner.hpp"
+#include "AudioProcessorThread.hpp"
 
-#define LNA_MIN 0
-#define LNA_MAX 40
-#define LNA_STEP 8
+#ifdef HAVE_QT_AUDIO
+#include <QtMultimedia/QAudioFormat>
+#include <QtMultimedia/QAudioSink>
+#endif
 
-#define VGA_MIN 0
-#define VGA_MAX 62
-#define VGA_STEP 2
-
-const double MIN_SAMPLE_RATE = 2e6;
-const double MAX_SAMPLE_RATE = 20e6;
-const double DEFAULT_SAMPLE_RATE = 2e6;
-
-const double MIN_BANDWIDTH = 1e6;
-const double MAX_BANDWIDTH = 20e6;
-const double DEFAULT_BANDWIDTH = 2e6;
-
-const double MIN_FREQ = 400e6;
-const double MAX_FREQ = 450e6;
-
-const int THRESHOLD_STEP = 1;
-const int THRESHOLD_MIN = -100;
-const int THRESHOLD_MAX = 50;
+#include <QMessageBox>
+#include <spdlog/spdlog.h>
+#include <algorithm>
+#include <limits>
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), plot(new QCustomPlot(this)),
+    : QMainWindow(parent),
+      centralWidget(new QWidget(this)),
+      plot(new QCustomPlot(this)),
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
-      alloc_params({434000000, 2400000, 2000000, 16, 16}), fftSize(1024),
-      average_power(0.0), threshold(0) {
+      scanActiveTimer(new QTimer(this)),
+      alloc_params({static_cast<uint64_t>(405.125 * 1e6),
+                    static_cast<uint64_t>(4.8 * 1e6),
+                    static_cast<uint32_t>(2.0 * 1e6), 0, 0, 1024}),
+      fftSize(1024),
+      average_power(0.0),
+      threshold(0),
+      listenToggleButton(nullptr),
+      volumeSlider(nullptr),
+      volumeLabel(nullptr),
+      listeningStatusLabel(nullptr),
+      listeningFrequencyLabel(nullptr),
+      plotModeAction(nullptr),
+      viewToolBar(nullptr) {
+
+    configure();
 
     this->setWindowTitle("Radio Scanner");
     controls = new QGroupBox(tr("HackRF Configuration"));
@@ -38,13 +42,16 @@ MainWindow::MainWindow(QWidget *parent)
     setupInfo();
 
     QVBoxLayout *controlLayout = new QVBoxLayout;
-    controlLayout->addWidget(new QLabel(tr("Center Frequency (Hz):")));
+    controlLayout->addWidget(
+        new QLabel(tr("Center Frequency (MHz):")));
     controlLayout->addWidget(frequencySpinBox);
 
-    controlLayout->addWidget(new QLabel(tr("Sample Rate (Hz):")));
+    controlLayout->addWidget(
+        new QLabel(tr("Sample Rate (MS/s):")));
     controlLayout->addWidget(sampleRateSpinBox);
 
-    controlLayout->addWidget(new QLabel(tr("Bandwidth (Hz):")));
+    controlLayout->addWidget(
+        new QLabel(tr("Bandwidth (MHz):")));
     controlLayout->addWidget(bandwidthSpinBox);
 
     QHBoxLayout *vgaLayout = new QHBoxLayout;
@@ -83,21 +90,49 @@ MainWindow::MainWindow(QWidget *parent)
     info->setLayout(infoLayout);
     info->setFixedWidth(300);
 
-    QVBoxLayout *controlsAndInfoLayout = new QVBoxLayout;
-    controlsAndInfoLayout->addWidget(controls);
-    controlsAndInfoLayout->addWidget(info);
-    controlsAndInfoLayout->addStretch();
-    QWidget *controlsAndInfoWidget = new QWidget();
-    controlsAndInfoWidget->setLayout(controlsAndInfoLayout);
-    controlsAndInfoWidget->setFixedWidth(300);
+#ifdef HAVE_QT_AUDIO
+    QAudioFormat format;
+    format.setSampleRate(audioSampleRate);
+    format.setChannelCount(1);
+    format.setSampleFormat(QAudioFormat::Int16);
 
-    QHBoxLayout *mainLayout = new QHBoxLayout;
-    mainLayout->addWidget(plot);
-    mainLayout->addWidget(controlsAndInfoWidget);
+    audioSink = new QAudioSink(format, this);
+    if (audioSink) {
+        audioSink->setVolume(0.5);
+        audioIODevice = audioSink->start();
+        if (!audioIODevice) {
+            spdlog::warn("Failed to start audio output device");
+        } else {
+            spdlog::info("Audio output initialized: {} Hz, {} channels, volume: {}", 
+                        format.sampleRate(), format.channelCount(), audioSink->volume());
+        }
+    } else {
+        spdlog::warn("Failed to create QAudioSink");
+    }
+#endif
 
-    QWidget *centralWidget = new QWidget();
-    centralWidget->setLayout(mainLayout);
+    audioTimer = new QTimer(this);
+    connect(audioTimer, &QTimer::timeout, this, &MainWindow::processAudio);
+
+#ifdef HAVE_QT_AUDIO
+    audioProcessorThread = new AudioProcessorThread(this);
+    connect(audioProcessorThread, &AudioProcessorThread::audioSamplesReady,
+            this, &MainWindow::onAudioSamplesReady);
+    audioProcessorThread->start();
+#endif
+
+    setupToolbar();
+
     setCentralWidget(centralWidget);
+    setupLayout();
+    
+#ifdef HAVE_QT_AUDIO
+    if (volumeSlider && audioSink) {
+        int volumeValue = volumeSlider->value();
+        audioSink->setVolume(volumeValue / 100.0f);
+        spdlog::info("Initial volume set to: {}%", volumeValue);
+    }
+#endif
 
     setupPlot();
     resize(1000, 600);
@@ -123,7 +158,9 @@ MainWindow::MainWindow(QWidget *parent)
     spectrumUpdateTimer->start(50);
     connect(averagePowerLevelTimer, &QTimer::timeout, this,
             &MainWindow::updateAveragePower);
-    averagePowerLevelTimer->start(2000);
+    averagePowerLevelTimer->start(100);
+    connect(scanActiveTimer, &QTimer::timeout, this, &MainWindow::scanActive);
+    scanActiveTimer->start(100);
 }
 
 MainWindow::~MainWindow() {
@@ -131,139 +168,123 @@ MainWindow::~MainWindow() {
         device->stopRx();
     }
     spectrumUpdateTimer->stop();
-}
-
-void MainWindow::setupPlot() {
-    plot->addGraph(); // Spectrum
-    plot->addGraph(); // Average Power Level
-    plot->graph(0)->setPen(QPen(Qt::blue));
-    plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
-    plot->xAxis->setLabel("Frequency (MHz)");
-    plot->yAxis->setLabel("Amplitude (dB)");
-
-    double freq_resolution = alloc_params.sample_rate / fftSize;
-    double start_freq_mhz =
-        (alloc_params.center_freq - alloc_params.sample_rate / 2.0) / 1e6;
-    double end_freq_mhz =
-        (alloc_params.center_freq + alloc_params.sample_rate / 2.0) / 1e6;
-    x_axis_values.resize(fftSize);
-    for (int i = 0; i < fftSize; ++i) {
-        x_axis_values[i] = start_freq_mhz + (i * freq_resolution) / 1e6;
+    averagePowerLevelTimer->stop();
+    scanActiveTimer->stop();
+#ifdef HAVE_QT_AUDIO
+    if (audioProcessorThread) {
+        audioProcessorThread->stopProcessing();
+        audioProcessorThread->wait();
     }
-
-    QVector<double> x(fftSize), y(fftSize), y2(fftSize);
-    for (int i = 0; i < fftSize; ++i) {
-        x[i] = x_axis_values[i];
-        y[i] = -200.0;
-        y2[i] = 0.0;
-    }
-    plot->graph(0)->setData(x, y);
-    plot->graph(1)->setData(x, y2);
-    plot->yAxis->setRange(-100.0, 50.0);
-    plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
-    plot->replot();
-}
-
-void MainWindow::setupControls() {
-    vgaLabel = new QLabel(QString::number(alloc_params.vga_gain));
-    lnaLabel = new QLabel(QString::number(alloc_params.lna_gain));
-    fftSizeLabel = new QLabel(QString::number(fftSize));
-    thresholdLabel = new QLabel(QString::number(threshold));
-
-    frequencySpinBox = new QSpinBox();
-    frequencySpinBox->setRange(MIN_FREQ, MAX_FREQ);
-    frequencySpinBox->setValue(alloc_params.center_freq);
-    frequencySpinBox->setSuffix(" Hz");
-    frequencySpinBox->setSingleStep(25000);
-
-    sampleRateSpinBox = new QSpinBox();
-    sampleRateSpinBox->setRange(MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
-    sampleRateSpinBox->setValue(alloc_params.sample_rate);
-    sampleRateSpinBox->setSuffix(" Hz");
-
-    bandwidthSpinBox = new QSpinBox();
-    bandwidthSpinBox->setRange(MIN_BANDWIDTH, MAX_BANDWIDTH);
-    bandwidthSpinBox->setValue(alloc_params.bandwidth);
-    bandwidthSpinBox->setSuffix(" Hz");
-
-    vgaSlider = new QSlider(Qt::Horizontal);
-    vgaSlider->setRange(VGA_MIN, VGA_MAX);
-    vgaSlider->setValue(alloc_params.vga_gain);
-    vgaSlider->setSingleStep(VGA_STEP);
-    vgaSlider->setPageStep(VGA_STEP);
-    connect(vgaSlider, &QSlider::sliderMoved, this, [this](int value) {
-        int rounded_value = ((value + VGA_STEP / 2) / VGA_STEP) * VGA_STEP;
-        rounded_value = qBound(VGA_MIN, rounded_value, VGA_MAX);
-        vgaSlider->setValue(rounded_value);
-    });
-    connect(vgaSlider, &QSlider::valueChanged, this,
-            [this](int value) { vgaLabel->setText(QString::number(value)); });
-
-    lnaSlider = new QSlider(Qt::Horizontal);
-    lnaSlider->setRange(LNA_MIN, LNA_MAX);
-    lnaSlider->setValue(alloc_params.lna_gain);
-    lnaSlider->setSingleStep(LNA_STEP);
-    lnaSlider->setPageStep(LNA_STEP);
-    connect(lnaSlider, &QSlider::sliderMoved, this, [this](int value) {
-        int rounded_value = ((value + LNA_STEP / 2) / LNA_STEP) * LNA_STEP;
-        rounded_value = qBound(LNA_MIN, rounded_value, LNA_MAX);
-        lnaSlider->setValue(rounded_value);
-    });
-    connect(lnaSlider, &QSlider::valueChanged, this,
-            [this](int value) { lnaLabel->setText(QString::number(value)); });
-    
-    thresholdSlider = new QSlider(Qt::Horizontal);
-    thresholdSlider->setRange(THRESHOLD_MIN, THRESHOLD_MAX);
-    thresholdSlider->setValue(threshold);
-    thresholdSlider->setSingleStep(THRESHOLD_STEP);
-    thresholdSlider->setPageStep(THRESHOLD_STEP);
-    connect(thresholdSlider, &QSlider::sliderMoved, this, [this](int value) {
-        int rounded_value = ((value + THRESHOLD_STEP / 2) / THRESHOLD_STEP) * THRESHOLD_STEP;
-        rounded_value = qBound(THRESHOLD_MIN, rounded_value, THRESHOLD_MAX);
-        thresholdSlider->setValue(rounded_value);
-    });
-    connect(thresholdSlider, &QSlider::valueChanged, this,
-            [this](int value) { 
-                thresholdLabel->setText(QString::number(value));
-                threshold = value;
-            });
-
-    fftSizeBox = new QComboBox();
-    fftSizeBox->addItem("512", 512);
-    fftSizeBox->addItem("1024", 1024);
-    fftSizeBox->addItem("2048", 2048);
-    fftSizeBox->addItem("4096", 4096);
-    fftSizeBox->setCurrentIndex(fftSizeBox->findData(
-        fftSize));
-
-    applyButton = new QPushButton(tr("Apply"));
-    connect(applyButton, &QPushButton::clicked, this, &MainWindow::applyConfig);
-}
-
-void MainWindow::setupInfo() {
-    averagePowerLabel = new QLabel(QString::number(average_power));
+#endif
 }
 
 void MainWindow::updateSpectrum() {
     if (!device)
         return;
 
-    spectrum_db = device->getMagnitudeSpectrum(fftSize);
+    spectrum_db = device->getMagnitudeSpectrum();
 
     if (spectrum_db.size() != static_cast<size_t>(fftSize)) {
         return;
     }
 
-    QVector<double> x(fftSize), y(fftSize), y2(fftSize);
-    for (int i = 0; i < fftSize; ++i) {
-        x[i] = x_axis_values[i];
-        y[i] = spectrum_db[i];
-        y2[i] = average_power + threshold;
+    static double last_sample_rate = 0.0;
+    static uint64_t last_center_freq = 0;
+    static int last_fft_size = 0;
+
+    double freq_resolution_hz = alloc_params.sample_rate / fftSize;
+    double start_freq_hz =
+        (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
+    double end_freq_hz =
+        (alloc_params.center_freq + alloc_params.sample_rate / 2.0);
+    double freq_resolution_mhz = freq_resolution_hz / 1e6;
+    double start_freq_mhz = start_freq_hz / 1e6;
+    double end_freq_mhz = end_freq_hz / 1e6;
+
+    if (alloc_params.sample_rate != last_sample_rate ||
+        alloc_params.center_freq != last_center_freq ||
+        fftSize != last_fft_size) {
+        waterfallHistory.clear();
+
+        x_axis_values.resize(fftSize);
+        for (int i = 0; i < fftSize; ++i) {
+            x_axis_values[i] = start_freq_mhz + (i * freq_resolution_mhz);
+        }
+
+        plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
+
+        last_sample_rate = alloc_params.sample_rate;
+        last_center_freq = alloc_params.center_freq;
+        last_fft_size = fftSize;
     }
 
-    plot->graph(0)->setData(x, y);
-    plot->graph(1)->setData(x, y2);
-    plot->replot();
+    if (currentPlotMode == PlotMode::Spectrum) {
+        if (plot->graphCount() < 2) {
+            setupPlot();
+            return;
+        }
+
+        QVector<double> x(fftSize), y(fftSize), y2(fftSize);
+        for (int i = 0; i < fftSize; ++i) {
+            x[i] = x_axis_values[i];
+            y[i] = spectrum_db[i];
+            y2[i] = average_power / 2 + threshold;
+        }
+
+        plot->graph(0)->setData(x, y);
+        plot->graph(1)->setData(x, y2);
+        plot->replot();
+    } else {
+        QVector<double> line(fftSize);
+        double minVal = std::numeric_limits<double>::max();
+        double maxVal = std::numeric_limits<double>::lowest();
+        for (int i = 0; i < fftSize; ++i) {
+            line[i] = spectrum_db[i];
+            minVal = std::min(minVal, line[i]);
+            maxVal = std::max(maxVal, line[i]);
+        }
+
+        waterfallHistory.push_back(std::move(line));
+        if (static_cast<int>(waterfallHistory.size()) > waterfallHistorySize) {
+            waterfallHistory.pop_front();
+        }
+
+        if (!waterfallMap) {
+            setupPlot();
+            return;
+        }
+
+        if (waterfallMap && waterfallMap->data()) {
+            QCPColorMapData *data = waterfallMap->data();
+            data->setSize(fftSize, waterfallHistorySize);
+            data->setKeyRange(QCPRange(start_freq_mhz, end_freq_mhz));
+            data->setValueRange(QCPRange(0, waterfallHistorySize));
+
+            const int rows = static_cast<int>(waterfallHistory.size());
+            for (int j = 0; j < waterfallHistorySize; ++j) {
+                int srcIndex = rows - 1 - j;
+                const QVector<double> *rowPtr =
+                    (srcIndex >= 0 && srcIndex < rows)
+                        ? &waterfallHistory[static_cast<size_t>(srcIndex)]
+                        : nullptr;
+                for (int i = 0; i < fftSize; ++i) {
+                    const bool hasRow = rowPtr && i < rowPtr->size();
+                    const double v = hasRow
+                                         ? (*rowPtr)[i]
+                                         : (minVal == std::numeric_limits<
+                                                             double>::max()
+                                                ? -200.0
+                                                : minVal);
+                    data->setCell(i, j, v);
+                }
+            }
+
+            if (waterfallColorScale) {
+                waterfallColorScale->setDataRange(QCPRange(minVal, maxVal));
+            }
+            plot->replot();
+        }
+    }
 }
 
 void MainWindow::applyConfig() {
@@ -272,13 +293,20 @@ void MainWindow::applyConfig() {
         return;
     }
 
-    alloc_params.center_freq = frequencySpinBox->value();
-    alloc_params.sample_rate = sampleRateSpinBox->value();
-    alloc_params.bandwidth = bandwidthSpinBox->value();
+    alloc_params.center_freq =
+        static_cast<uint64_t>(frequencySpinBox->value() * 1e6);
+    alloc_params.sample_rate =
+        static_cast<double>(sampleRateSpinBox->value() * 1e6);
+    alloc_params.bandwidth =
+        static_cast<uint32_t>(bandwidthSpinBox->value() * 1e6);
     alloc_params.vga_gain = vgaSlider->value();
     alloc_params.lna_gain = lnaSlider->value();
     fftSize = fftSizeBox->currentData().toInt();
+    alloc_params.fft_size = fftSize;
     fftSizeLabel->setText(QString::number(fftSize));
+    windowed_samples.clear();
+    windowed_samples.resize(WINDOW_SIZE_BY_FFTSIZE[fftSize]);
+    waterfallHistory.clear();
     device->stopRx();
     bool success = device->configure(alloc_params);
 
@@ -306,4 +334,88 @@ void MainWindow::updateAveragePower() {
     average_power = sum / spectrum_db.size();
 
     averagePowerLabel->setText(QString::number(average_power, 'f', 2));
+}
+
+void MainWindow::toggleDisplayMode() {
+    currentPlotMode = currentPlotMode == PlotMode::Spectrum
+                          ? PlotMode::Waterfall
+                          : PlotMode::Spectrum;
+
+    waterfallHistory.clear();
+
+    updateDisplayModeControls();
+    setupPlot();
+}
+
+
+void MainWindow::scanActive() {
+    if (!device || spectrum_db.empty()) {
+        return;
+    }
+
+    int total_bins = static_cast<int>(spectrum_db.size());
+    int scan_window_size_bins = WINDOW_SIZE_BY_FFTSIZE[fftSize];
+
+    if (scan_window_size_bins > total_bins) {
+        spdlog::warn("Scan window size ({}) is larger than total bins ({}). "
+                     "Skipping scan.",
+                     scan_window_size_bins, total_bins);
+        scan_current_start_index = 0;
+        return;
+    }
+
+    while (scan_current_start_index + scan_window_size_bins <= total_bins) {
+        int start_idx = scan_current_start_index;
+        int end_idx = start_idx + scan_window_size_bins;
+
+        double sum_in_window = 0.0;
+        for (int i = start_idx; i < end_idx; ++i) {
+            sum_in_window += spectrum_db[i];
+        }
+        double average_in_window = sum_in_window / scan_window_size_bins;
+
+        bool activity_detected = false;
+
+        if (average_in_window > (average_power / 2 + threshold)) {
+            activity_detected = true;
+        }
+
+        if (activity_detected) {
+            spdlog::info("Activity detected in frequency {}",
+                         x_axis_values[end_idx - start_idx / 2]);
+        }
+
+        scan_current_start_index += 1;
+    }
+
+    if (scan_current_start_index + scan_window_size_bins > total_bins) {
+        scan_current_start_index = 0;
+    }
+}
+
+void MainWindow::setupVolumeSliderConnection() {
+#ifdef HAVE_QT_AUDIO
+    if (volumeSlider) {
+        disconnect(volumeSlider, &QSlider::valueChanged, this, nullptr);
+        
+        connect(volumeSlider, &QSlider::valueChanged, this,
+                [this](int value) {
+                    if (audioSink) {
+                        float volume = value / 100.0f;
+                        audioSink->setVolume(volume);
+                        spdlog::debug("Volume set to: {}% ({})", value, volume);
+                    } else {
+                        spdlog::warn("Cannot set volume: audioSink is null");
+                    }
+                    if (volumeLabel) {
+                        volumeLabel->setText(QString("%1%").arg(value));
+                    }
+                });
+        
+        if (audioSink) {
+            int currentValue = volumeSlider->value();
+            audioSink->setVolume(currentValue / 100.0f);
+        }
+    }
+#endif
 }
