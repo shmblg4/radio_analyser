@@ -17,10 +17,15 @@ void MainWindow::setupPlot() {
     plot->clearItems();
 
     if (waterfallColorScale) {
+        // Disconnect from waterfallMap first if it exists
+        if (waterfallMap) {
+            waterfallMap->setColorScale(nullptr);
+        }
         plot->plotLayout()->remove(waterfallColorScale);
-        waterfallColorScale->deleteLater();
-        waterfallColorScale = nullptr;
         plot->plotLayout()->simplify();
+        // Use delete instead of deleteLater() to avoid segfault on Raspberry Pi 5
+        delete waterfallColorScale;
+        waterfallColorScale = nullptr;
     }
     waterfallMap = nullptr;
 
