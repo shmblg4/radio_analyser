@@ -24,10 +24,12 @@
 #include <QByteArray>
 #include <QToolBar>
 #include <QPointer>
+#include <QListWidget>
 #include <deque>
 #include <map>
 #include <memory>
 #include <vector>
+#include <algorithm>
 
 class QAudioFormat;
 class QAudioSink;
@@ -44,6 +46,7 @@ private slots:
     void applyConfig();
     void updateAveragePower();
     void scanActive();
+    void activeFreqCleanup();
 
 private:
     enum class PlotMode { Spectrum, Waterfall };
@@ -64,6 +67,8 @@ private:
     void updateListeningParameterControls();
     void setupVolumeSliderConnection();
     void updateDisplayModeControls();
+    void updateDetectedFrequenciesList();
+    bool isNearExistingFrequency(double newFreq, double& existingFreq);
 
     std::unique_ptr<HackrfDevice> device;
     hackrf_alloc_params alloc_params;
@@ -71,6 +76,7 @@ private:
     QTimer *spectrumUpdateTimer;
     QTimer *averagePowerLevelTimer;
     QTimer *scanActiveTimer;
+    QTimer *activeFreqCleanupTimer;
 
     int fftSize;
     double average_power;
@@ -82,6 +88,10 @@ private:
     std::vector<double> windowed_samples;
     std::deque<QVector<double>> waterfallHistory;
     int waterfallHistorySize = 200;
+
+    std::vector<double> detectedFrequencies;
+    static constexpr double FREQUENCY_TOLERANCE_MHZ = 0.0125; // 12.5 кГц
+    static constexpr size_t MAX_DETECTED_FREQUENCIES = 10;
 
     QGroupBox *controls;
     QWidget *controlsAndInfoWidget;
@@ -102,6 +112,9 @@ private:
     QLabel *volumeLabel;
     QLabel *listeningStatusLabel;
     QLabel *listeningFrequencyLabel;
+
+    QGroupBox *detectedFrequenciesGroup;
+    QListWidget *detectedFrequenciesList;
 
     QGroupBox *info;
     QLabel *averagePowerLabel;
@@ -125,6 +138,7 @@ private slots:
     void onAudioSamplesReady(const std::vector<int16_t> &samples);
     void toggleDisplayMode();
     void updateListeningStatus();
+    void onDetectedFrequencyClicked(QListWidgetItem* item);
 };
 
 #endif

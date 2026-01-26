@@ -19,6 +19,7 @@ MainWindow::MainWindow(QWidget *parent)
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
       scanActiveTimer(new QTimer(this)),
+      activeFreqCleanupTimer(new QTimer(this)),
       alloc_params({static_cast<uint64_t>(405.125 * 1e6),
                     static_cast<uint64_t>(4.8 * 1e6),
                     static_cast<uint32_t>(2.0 * 1e6), 0, 0, 1024}),
@@ -30,6 +31,8 @@ MainWindow::MainWindow(QWidget *parent)
       volumeLabel(nullptr),
       listeningStatusLabel(nullptr),
       listeningFrequencyLabel(nullptr),
+      detectedFrequenciesGroup(nullptr),
+      detectedFrequenciesList(nullptr),
       plotModeAction(nullptr),
       viewToolBar(nullptr) {
 
@@ -160,7 +163,9 @@ MainWindow::MainWindow(QWidget *parent)
             &MainWindow::updateAveragePower);
     averagePowerLevelTimer->start(100);
     connect(scanActiveTimer, &QTimer::timeout, this, &MainWindow::scanActive);
-    scanActiveTimer->start(100);
+    scanActiveTimer->start(500);
+    connect(activeFreqCleanupTimer, &QTimer::timeout, this, &MainWindow::activeFreqCleanup);
+    activeFreqCleanupTimer->start(5000);
 }
 
 MainWindow::~MainWindow() {
@@ -228,7 +233,7 @@ void MainWindow::updateSpectrum() {
         for (int i = 0; i < fftSize; ++i) {
             x[i] = x_axis_values[i];
             y[i] = spectrum_db[i];
-            y2[i] = average_power / 2 + threshold;
+            y2[i] = average_power + threshold; 
         }
 
         plot->graph(0)->setData(x, y);
@@ -381,8 +386,23 @@ void MainWindow::scanActive() {
         }
 
         if (activity_detected) {
-            spdlog::info("Activity detected in frequency {}",
-                         x_axis_values[end_idx - start_idx / 2]);
+            double detected_freq_mhz = x_axis_values[start_idx + scan_window_size_bins / 2];
+            
+            double existing_freq = 0.0;
+            if (isNearExistingFrequency(detected_freq_mhz, existing_freq)) {
+                auto it = std::find(detectedFrequencies.begin(), detectedFrequencies.end(), existing_freq);
+                if (it != detectedFrequencies.end()) {
+                    *it = (existing_freq + detected_freq_mhz) / 2.0;
+                }
+            } else {
+                detectedFrequencies.push_back(detected_freq_mhz);
+                
+                if (detectedFrequencies.size() > MAX_DETECTED_FREQUENCIES) {
+                    detectedFrequencies.erase(detectedFrequencies.begin());
+                }
+            }
+            
+            updateDetectedFrequenciesList();
         }
 
         scan_current_start_index += 1;
@@ -391,6 +411,49 @@ void MainWindow::scanActive() {
     if (scan_current_start_index + scan_window_size_bins > total_bins) {
         scan_current_start_index = 0;
     }
+}
+
+bool MainWindow::isNearExistingFrequency(double newFreq, double& existingFreq) {
+    for (auto& freq : detectedFrequencies) {
+        if (std::abs(newFreq - freq) <= FREQUENCY_TOLERANCE_MHZ) {
+            existingFreq = freq;
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::updateDetectedFrequenciesList() {
+    if (!detectedFrequenciesList) {
+        return;
+    }
+    
+    detectedFrequenciesList->clear();
+    
+    std::vector<double> sortedFreqs = detectedFrequencies;
+    std::sort(sortedFreqs.begin(), sortedFreqs.end());
+    
+    for (const auto& freq : sortedFreqs) {
+        QString freqText = QString("%1 MHz").arg(freq, 0, 'f', 3);
+        QListWidgetItem* item = new QListWidgetItem(freqText, detectedFrequenciesList);
+        item->setData(Qt::UserRole, freq);
+    }
+}
+
+void MainWindow::onDetectedFrequencyClicked(QListWidgetItem* item) {
+    if (!item || !frequencySpinBox) {
+        return;
+    }
+    
+    double freq_mhz = item->data(Qt::UserRole).toDouble();
+    
+    frequencySpinBox->setValue(freq_mhz);
+    
+    applyConfig();
+}
+
+void MainWindow::activeFreqCleanup() {
+    detectedFrequenciesList->clear();
 }
 
 void MainWindow::setupVolumeSliderConnection() {

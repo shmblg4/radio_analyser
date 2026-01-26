@@ -1,6 +1,10 @@
 #include "radio_scanner.hpp"
 #include <cmath>
 #include <fftw3.h>
+#include <fstream>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
 
 std::vector<double>
 performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
@@ -32,7 +36,7 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
         in[i][0] = samples[i].real();
         in[i][1] = samples[i].imag();
     }
-
+    
     p = fftw_plan_dft_1d(fft_size, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
 
     fftw_execute(p);
@@ -210,9 +214,9 @@ HackrfDevice::convertRawSamples(const std::vector<int8_t> &raw_samples) {
 
     for (size_t i = 0; i < num_samples; ++i) {
         float i_val = static_cast<float>(raw_samples[2 * i]) /
-                      127.0f;
+                      128.0f;
         float q_val = static_cast<float>(raw_samples[2 * i + 1]) /
-                      127.0f;
+                      128.0f;
         iq_samples.emplace_back(i_val, q_val);
     }
     return iq_samples;

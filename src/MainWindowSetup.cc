@@ -17,13 +17,11 @@ void MainWindow::setupPlot() {
     plot->clearItems();
 
     if (waterfallColorScale) {
-        // Disconnect from waterfallMap first if it exists
         if (waterfallMap) {
             waterfallMap->setColorScale(nullptr);
         }
         plot->plotLayout()->remove(waterfallColorScale);
         plot->plotLayout()->simplify();
-        // Use delete instead of deleteLater() to avoid segfault on Raspberry Pi 5
         delete waterfallColorScale;
         waterfallColorScale = nullptr;
     }
@@ -260,7 +258,32 @@ void MainWindow::setupLayout() {
     rightPanelWidget->setLayout(rightPanelLayout);
     rightPanelWidget->setFixedWidth(300);
 
+    if (!detectedFrequenciesGroup) {
+        detectedFrequenciesGroup = new QGroupBox(tr("Задетектированные частоты"), this);
+        QVBoxLayout *detectedFreqLayout = new QVBoxLayout;
+        
+        if (!detectedFrequenciesList) {
+            detectedFrequenciesList = new QListWidget(this);
+            detectedFrequenciesList->setFixedSize(250, 200);
+            detectedFrequenciesList->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+            connect(detectedFrequenciesList, &QListWidget::itemClicked, this,
+                    &MainWindow::onDetectedFrequencyClicked);
+        }
+        
+        detectedFreqLayout->addWidget(detectedFrequenciesList);
+        detectedFrequenciesGroup->setLayout(detectedFreqLayout);
+        detectedFrequenciesGroup->setFixedWidth(250);
+    }
+
+    QWidget *leftPanelWidget = new QWidget(this);
+    QVBoxLayout *leftPanelLayout = new QVBoxLayout;
+    leftPanelLayout->addWidget(detectedFrequenciesGroup);
+    leftPanelLayout->addStretch();
+    leftPanelWidget->setLayout(leftPanelLayout);
+    leftPanelWidget->setFixedWidth(250);
+
     QHBoxLayout *mainLayout = new QHBoxLayout;
+    mainLayout->addWidget(leftPanelWidget);
     mainLayout->addWidget(plot);
     mainLayout->addWidget(rightPanelWidget);
 
