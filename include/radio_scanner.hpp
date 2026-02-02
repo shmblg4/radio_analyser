@@ -58,6 +58,11 @@ private:
     convertRawSamples(const std::vector<int8_t> &raw_samples);
     std::vector<double> calculateMagnitudeSpectrum(
         const std::vector<std::complex<float>> &iq_samples, int fft_size);
+    void removeDCOffset(std::vector<std::complex<float>> &iq_samples);
+
+    float __dc_i_accumulator__ = 0.0f;
+    float __dc_q_accumulator__ = 0.0f;
+    std::mutex __dc_mutex__;
 };
 
 #endif

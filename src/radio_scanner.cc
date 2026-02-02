@@ -87,6 +87,11 @@ bool HackrfDevice::configure(hackrf_alloc_params alloc_params) {
 }
 
 bool HackrfDevice::_configure_device() {
+    {
+        std::lock_guard<std::mutex> lock(__dc_mutex__);
+        __dc_i_accumulator__ = 0.0f;
+        __dc_q_accumulator__ = 0.0f;
+    }
     auto result = hackrf_set_freq(__dev__, __alloc_params__.center_freq);
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to set frequency: {}",
@@ -184,6 +189,7 @@ std::vector<std::complex<float>> HackrfDevice::getIQSamplesForProcessing() {
     std::vector<std::complex<float>> iq_samples =
         convertRawSamples(__samples_buffer__);
     __samples_buffer__.clear();
+    removeDCOffset(iq_samples);
     return iq_samples;
 }
 
@@ -225,4 +231,23 @@ HackrfDevice::convertRawSamples(const std::vector<int8_t> &raw_samples) {
 std::vector<double> HackrfDevice::calculateMagnitudeSpectrum(
     const std::vector<std::complex<float>> &iq_samples, int fft_size) {
     return performFFTAndGetMagnitude(iq_samples, fft_size);
+}
+
+void HackrfDevice::removeDCOffset(std::vector<std::complex<float>> &iq_samples) {
+    if (iq_samples.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(__dc_mutex__);
+    const float dc_alpha = 0.995f;
+    const float dc_one_minus_alpha = 1.0f - dc_alpha;
+    for (auto &s : iq_samples) {
+        float i_val = s.real();
+        float q_val = s.imag();
+        __dc_i_accumulator__ =
+            dc_alpha * __dc_i_accumulator__ + dc_one_minus_alpha * i_val;
+        __dc_q_accumulator__ =
+            dc_alpha * __dc_q_accumulator__ + dc_one_minus_alpha * q_val;
+        s = std::complex<float>(i_val - __dc_i_accumulator__,
+                                q_val - __dc_q_accumulator__);
+    }
 }
