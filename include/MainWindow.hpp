@@ -25,8 +25,8 @@
 #include <QToolBar>
 #include <QPointer>
 #include <QListWidget>
+#include <QPlainTextEdit>
 #include <deque>
-#include <map>
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -40,6 +40,10 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+    void applyTheme(bool dark);
+
+public slots:
+    void appendLog(QString text);
 
 private slots:
     void updateSpectrum();
@@ -63,11 +67,13 @@ private:
     void setupControls();
     void setupInfo();
     void setupToolbar();
+    void setupMenuBar();
     void setupLayout();
     void updateListeningParameterControls();
     void setupVolumeSliderConnection();
     void updateDisplayModeControls();
     void updateDetectedFrequenciesList();
+    void updatePlotTheme(bool dark);
     bool isNearExistingFrequency(double newFreq, double& existingFreq);
 
     std::unique_ptr<HackrfDevice> device;
@@ -90,7 +96,7 @@ private:
     int waterfallHistorySize = 200;
 
     std::vector<double> detectedFrequencies;
-    static constexpr double FREQUENCY_TOLERANCE_MHZ = 0.0125; // 12.5 кГц
+    static constexpr double FREQUENCY_TOLERANCE_MHZ = 0.025;  // 25 кГц — ширина канала LPD
     static constexpr size_t MAX_DETECTED_FREQUENCIES = 10;
 
     QGroupBox *controls;
@@ -119,10 +125,15 @@ private:
     QGroupBox *info;
     QLabel *averagePowerLabel;
 
-    std::map<int, int> WINDOW_SIZE_BY_FFTSIZE;
+    QGroupBox *logGroup = nullptr;
+    QPlainTextEdit *logTextEdit = nullptr;
+    static constexpr int maxLogLines = 1000;
 
     QAction *plotModeAction = nullptr;
     QToolBar *viewToolBar = nullptr;
+    QAction *darkThemeAction = nullptr;
+    QAction *lightThemeAction = nullptr;
+    bool darkTheme_ = true;
 
     bool listeningActive = false;
     QTimer *audioTimer = nullptr;
@@ -133,6 +144,8 @@ private:
     AudioProcessorThread *audioProcessorThread = nullptr;
 
 private slots:
+    void setDarkTheme();
+    void setLightTheme();
     void toggleListening();
     void processAudio();
     void onAudioSamplesReady(const std::vector<int16_t> &samples);

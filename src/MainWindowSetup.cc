@@ -1,14 +1,11 @@
 #include "MainWindow.hpp"
 #include "MainWindowConstants.hpp"
+#include <QFontDatabase>
 #include <QMessageBox>
 #include <QSignalBlocker>
 
 void MainWindow::configure() {
     scan_current_start_index = 0;
-    WINDOW_SIZE_BY_FFTSIZE[512] = 6;
-    WINDOW_SIZE_BY_FFTSIZE[1024] = 13;
-    WINDOW_SIZE_BY_FFTSIZE[2048] = 26;
-    WINDOW_SIZE_BY_FFTSIZE[4096] = 51;
 }
 
 void MainWindow::setupPlot() {
@@ -84,6 +81,7 @@ void MainWindow::setupPlot() {
         plot->yAxis->setRange(0, waterfallHistorySize);
     }
 
+    updatePlotTheme(darkTheme_);
     plot->replot();
 }
 
@@ -171,6 +169,18 @@ void MainWindow::setupInfo() {
     averagePowerLabel = new QLabel(QString::number(average_power));
 }
 
+void MainWindow::setupMenuBar() {
+    QMenu *viewMenu = menuBar()->addMenu(tr("Вид"));
+    darkThemeAction = viewMenu->addAction(tr("Тёмная тема"));
+    darkThemeAction->setCheckable(true);
+    darkThemeAction->setChecked(true);
+    connect(darkThemeAction, &QAction::triggered, this, &MainWindow::setDarkTheme);
+    lightThemeAction = viewMenu->addAction(tr("Светлая тема"));
+    lightThemeAction->setCheckable(true);
+    lightThemeAction->setChecked(false);
+    connect(lightThemeAction, &QAction::triggered, this, &MainWindow::setLightTheme);
+}
+
 void MainWindow::setupToolbar() {
     if (!viewToolBar) {
         viewToolBar = addToolBar(tr("График"));
@@ -248,44 +258,60 @@ void MainWindow::setupLayout() {
     listeningInfoGroup->setLayout(listeningInfoLayout);
     listeningInfoGroup->setFixedWidth(300);
 
-    QVBoxLayout *rightPanelLayout = new QVBoxLayout;
-    rightPanelLayout->addWidget(listeningInfoGroup);
-    rightPanelLayout->addWidget(controls);
-    rightPanelLayout->addWidget(info);
-    rightPanelLayout->addStretch();
-
-    QWidget *rightPanelWidget = new QWidget(this);
-    rightPanelWidget->setLayout(rightPanelLayout);
-    rightPanelWidget->setFixedWidth(300);
-
     if (!detectedFrequenciesGroup) {
         detectedFrequenciesGroup = new QGroupBox(tr("Задетектированные частоты"), this);
         QVBoxLayout *detectedFreqLayout = new QVBoxLayout;
         
         if (!detectedFrequenciesList) {
             detectedFrequenciesList = new QListWidget(this);
-            detectedFrequenciesList->setFixedSize(250, 200);
-            detectedFrequenciesList->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+            detectedFrequenciesList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
             connect(detectedFrequenciesList, &QListWidget::itemClicked, this,
                     &MainWindow::onDetectedFrequencyClicked);
         }
         
         detectedFreqLayout->addWidget(detectedFrequenciesList);
         detectedFrequenciesGroup->setLayout(detectedFreqLayout);
-        detectedFrequenciesGroup->setFixedWidth(250);
     }
 
-    QWidget *leftPanelWidget = new QWidget(this);
-    QVBoxLayout *leftPanelLayout = new QVBoxLayout;
-    leftPanelLayout->addWidget(detectedFrequenciesGroup);
-    leftPanelLayout->addStretch();
-    leftPanelWidget->setLayout(leftPanelLayout);
-    leftPanelWidget->setFixedWidth(250);
+    if (!logGroup) {
+        logGroup = new QGroupBox(tr("Лог"), this);
+        logTextEdit = new QPlainTextEdit(this);
+        logTextEdit->setReadOnly(true);
+        logTextEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        logTextEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        QVBoxLayout *logLayout = new QVBoxLayout;
+        logLayout->addWidget(logTextEdit);
+        logGroup->setLayout(logLayout);
+    }
 
-    QHBoxLayout *mainLayout = new QHBoxLayout;
-    mainLayout->addWidget(leftPanelWidget);
-    mainLayout->addWidget(plot);
-    mainLayout->addWidget(rightPanelWidget);
+    QVBoxLayout *configColumnLayout = new QVBoxLayout;
+    configColumnLayout->addWidget(listeningInfoGroup);
+    configColumnLayout->addWidget(controls);
+    configColumnLayout->addWidget(info);
+    configColumnLayout->addStretch();
+
+    QWidget *configColumnWidget = new QWidget(this);
+    configColumnWidget->setLayout(configColumnLayout);
+    configColumnWidget->setFixedWidth(300);
+
+    QHBoxLayout *topRowLayout = new QHBoxLayout;
+    topRowLayout->addWidget(plot, 1);
+    topRowLayout->addWidget(configColumnWidget);
+
+    QWidget *topRowWidget = new QWidget(this);
+    topRowWidget->setLayout(topRowLayout);
+
+    QHBoxLayout *bottomRowLayout = new QHBoxLayout;
+    bottomRowLayout->addWidget(detectedFrequenciesGroup, 1);
+    bottomRowLayout->addWidget(logGroup, 1);
+
+    QWidget *bottomRowWidget = new QWidget(this);
+    bottomRowWidget->setLayout(bottomRowLayout);
+    bottomRowWidget->setMaximumHeight(220);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout;
+    mainLayout->addWidget(topRowWidget, 1);
+    mainLayout->addWidget(bottomRowWidget);
 
     centralWidget->setLayout(mainLayout);
 

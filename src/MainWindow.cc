@@ -1,13 +1,19 @@
 #include "MainWindow.hpp"
-#include "radio_scanner.hpp"
 #include "AudioProcessorThread.hpp"
+#include "LogSink.hpp"
+#include "radio_scanner.hpp"
 
 #ifdef HAVE_QT_AUDIO
 #include <QtMultimedia/QAudioFormat>
 #include <QtMultimedia/QAudioSink>
 #endif
 
+#include <QBrush>
+#include <QColor>
+#include <QMenuBar>
 #include <QMessageBox>
+#include <QPalette>
+#include <QTextCursor>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <limits>
@@ -124,11 +130,18 @@ MainWindow::MainWindow(QWidget *parent)
     audioProcessorThread->start();
 #endif
 
+    setupMenuBar();
     setupToolbar();
 
     setCentralWidget(centralWidget);
     setupLayout();
-    
+
+    {
+        auto logSink = std::make_shared<LogSink>(this);
+        spdlog::default_logger()->sinks().clear();
+        spdlog::default_logger()->sinks().push_back(logSink);
+    }
+
 #ifdef HAVE_QT_AUDIO
     if (volumeSlider && audioSink) {
         int volumeValue = volumeSlider->value();
@@ -138,7 +151,8 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
 
     setupPlot();
-    resize(1000, 600);
+    setMinimumSize(1100, 700);
+    resize(1200, 800);
     try {
         device = std::make_unique<HackrfDevice>();
         if (!device->configure(alloc_params)) {
@@ -164,8 +178,6 @@ MainWindow::MainWindow(QWidget *parent)
     averagePowerLevelTimer->start(100);
     connect(scanActiveTimer, &QTimer::timeout, this, &MainWindow::scanActive);
     scanActiveTimer->start(500);
-    connect(activeFreqCleanupTimer, &QTimer::timeout, this, &MainWindow::activeFreqCleanup);
-    activeFreqCleanupTimer->start(5000);
 }
 
 MainWindow::~MainWindow() {
@@ -310,7 +322,9 @@ void MainWindow::applyConfig() {
     alloc_params.fft_size = fftSize;
     fftSizeLabel->setText(QString::number(fftSize));
     windowed_samples.clear();
-    windowed_samples.resize(WINDOW_SIZE_BY_FFTSIZE[fftSize]);
+    const double freq_res_hz = alloc_params.sample_rate / fftSize;
+    const int bins_per_25khz = std::max(1, static_cast<int>(std::round(25000.0 / freq_res_hz)));
+    windowed_samples.resize(bins_per_25khz);
     waterfallHistory.clear();
     device->stopRx();
     bool success = device->configure(alloc_params);
@@ -352,65 +366,140 @@ void MainWindow::toggleDisplayMode() {
     setupPlot();
 }
 
+void MainWindow::applyTheme(bool dark) {
+    darkTheme_ = dark;
+    if (dark) {
+        QPalette p;
+        p.setColor(QPalette::Window, QColor(53, 53, 53));
+        p.setColor(QPalette::WindowText, Qt::white);
+        p.setColor(QPalette::Base, QColor(42, 42, 42));
+        p.setColor(QPalette::Text, Qt::white);
+        p.setColor(QPalette::Button, QColor(53, 53, 53));
+        p.setColor(QPalette::ButtonText, Qt::white);
+        p.setColor(QPalette::Highlight, QColor(42, 130, 218));
+        p.setColor(QPalette::HighlightedText, Qt::white);
+        p.setColor(QPalette::PlaceholderText, QColor(127, 127, 127));
+        p.setColor(QPalette::AlternateBase, QColor(45, 45, 45));
+        p.setColor(QPalette::ToolTipBase, QColor(53, 53, 53));
+        p.setColor(QPalette::ToolTipText, Qt::white);
+        p.setColor(QPalette::Link, QColor(42, 130, 218));
+        QApplication::setPalette(p);
+        if (darkThemeAction) darkThemeAction->setChecked(true);
+        if (lightThemeAction) lightThemeAction->setChecked(false);
+    } else {
+        QApplication::setPalette(QPalette());
+        if (darkThemeAction) darkThemeAction->setChecked(false);
+        if (lightThemeAction) lightThemeAction->setChecked(true);
+    }
+    updatePlotTheme(dark);
+}
+
+void MainWindow::setDarkTheme() {
+    applyTheme(true);
+}
+
+void MainWindow::setLightTheme() {
+    applyTheme(false);
+}
+
+void MainWindow::updatePlotTheme(bool dark) {
+    if (!plot) return;
+    if (dark) {
+        plot->setBackground(QBrush(QColor(53, 53, 53)));
+        plot->xAxis->setBasePen(QPen(Qt::white));
+        plot->xAxis->setTickPen(QPen(Qt::white));
+        plot->xAxis->setSubTickPen(QPen(Qt::white));
+        plot->xAxis->setTickLabelColor(Qt::white);
+        plot->xAxis->setLabelColor(Qt::white);
+        plot->yAxis->setBasePen(QPen(Qt::white));
+        plot->yAxis->setTickPen(QPen(Qt::white));
+        plot->yAxis->setSubTickPen(QPen(Qt::white));
+        plot->yAxis->setTickLabelColor(Qt::white);
+        plot->yAxis->setLabelColor(Qt::white);
+        if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(QColor(100, 180, 255)));
+        if (plot->graphCount() >= 2) plot->graph(1)->setPen(QPen(QColor(255, 100, 100), 3, Qt::DashLine));
+    } else {
+        plot->setBackground(QBrush(Qt::white));
+        plot->xAxis->setBasePen(QPen(Qt::black));
+        plot->xAxis->setTickPen(QPen(Qt::black));
+        plot->xAxis->setSubTickPen(QPen(Qt::black));
+        plot->xAxis->setTickLabelColor(Qt::black);
+        plot->xAxis->setLabelColor(Qt::black);
+        plot->yAxis->setBasePen(QPen(Qt::black));
+        plot->yAxis->setTickPen(QPen(Qt::black));
+        plot->yAxis->setSubTickPen(QPen(Qt::black));
+        plot->yAxis->setTickLabelColor(Qt::black);
+        plot->yAxis->setLabelColor(Qt::black);
+        if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(Qt::blue));
+        if (plot->graphCount() >= 2) plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
+    }
+    plot->replot();
+}
 
 void MainWindow::scanActive() {
-    if (!device || spectrum_db.empty()) {
+    if (!device || spectrum_db.empty() || x_axis_values.size() != spectrum_db.size()) {
         return;
     }
 
-    int total_bins = static_cast<int>(spectrum_db.size());
-    int scan_window_size_bins = WINDOW_SIZE_BY_FFTSIZE[fftSize];
-
-    if (scan_window_size_bins > total_bins) {
-        spdlog::warn("Scan window size ({}) is larger than total bins ({}). "
-                     "Skipping scan.",
-                     scan_window_size_bins, total_bins);
-        scan_current_start_index = 0;
-        return;
+    const int total_bins = static_cast<int>(spectrum_db.size());
+    const double freq_resolution_hz = alloc_params.sample_rate / fftSize;
+    constexpr double subband_width_hz = 25000.0;  // LPD channel width 25 kHz
+    int bins_per_subband = static_cast<int>(std::round(subband_width_hz / freq_resolution_hz));
+    if (bins_per_subband < 1) {
+        bins_per_subband = 1;
+    }
+    if (bins_per_subband > total_bins) {
+        bins_per_subband = total_bins;
     }
 
-    while (scan_current_start_index + scan_window_size_bins <= total_bins) {
-        int start_idx = scan_current_start_index;
-        int end_idx = start_idx + scan_window_size_bins;
-
-        double sum_in_window = 0.0;
-        for (int i = start_idx; i < end_idx; ++i) {
-            sum_in_window += spectrum_db[i];
+    std::vector<double> subband_power;
+    subband_power.reserve((total_bins + bins_per_subband - 1) / bins_per_subband);
+    for (int start_idx = 0; start_idx + bins_per_subband <= total_bins;
+         start_idx += bins_per_subband) {
+        double sum_in_subband = 0.0;
+        for (int i = start_idx; i < start_idx + bins_per_subband; ++i) {
+            sum_in_subband += spectrum_db[i];
         }
-        double average_in_window = sum_in_window / scan_window_size_bins;
+        subband_power.push_back(sum_in_subband / bins_per_subband);
+    }
 
-        bool activity_detected = false;
+    const double power_threshold = average_power / 2.0 + threshold;
+    const int num_subbands = static_cast<int>(subband_power.size());
 
-        if (average_in_window > (average_power / 2 + threshold)) {
-            activity_detected = true;
+    for (int k = 0; k < num_subbands; ++k) {
+        if (subband_power[k] <= power_threshold) {
+            continue;
+        }
+        bool is_local_max = true;
+        if (k > 0 && subband_power[k] < subband_power[k - 1]) {
+            is_local_max = false;
+        }
+        if (k + 1 < num_subbands && subband_power[k] < subband_power[k + 1]) {
+            is_local_max = false;
+        }
+        if (!is_local_max) {
+            continue;
         }
 
-        if (activity_detected) {
-            double detected_freq_mhz = x_axis_values[start_idx + scan_window_size_bins / 2];
-            
-            double existing_freq = 0.0;
-            if (isNearExistingFrequency(detected_freq_mhz, existing_freq)) {
-                auto it = std::find(detectedFrequencies.begin(), detectedFrequencies.end(), existing_freq);
-                if (it != detectedFrequencies.end()) {
-                    *it = (existing_freq + detected_freq_mhz) / 2.0;
-                }
-            } else {
-                detectedFrequencies.push_back(detected_freq_mhz);
-                
-                if (detectedFrequencies.size() > MAX_DETECTED_FREQUENCIES) {
-                    detectedFrequencies.erase(detectedFrequencies.begin());
-                }
+        const int start_idx = k * bins_per_subband;
+        const int center_bin = start_idx + bins_per_subband / 2;
+        const double detected_freq_mhz = x_axis_values[center_bin];
+
+        double existing_freq = 0.0;
+        if (isNearExistingFrequency(detected_freq_mhz, existing_freq)) {
+            auto it = std::find(detectedFrequencies.begin(), detectedFrequencies.end(), existing_freq);
+            if (it != detectedFrequencies.end()) {
+                *it = (existing_freq + detected_freq_mhz) / 2.0;
             }
-            
-            updateDetectedFrequenciesList();
+        } else {
+            detectedFrequencies.push_back(detected_freq_mhz);
+            if (detectedFrequencies.size() > MAX_DETECTED_FREQUENCIES) {
+                detectedFrequencies.erase(detectedFrequencies.begin());
+            }
         }
-
-        scan_current_start_index += 1;
     }
 
-    if (scan_current_start_index + scan_window_size_bins > total_bins) {
-        scan_current_start_index = 0;
-    }
+    updateDetectedFrequenciesList();
 }
 
 bool MainWindow::isNearExistingFrequency(double newFreq, double& existingFreq) {
@@ -454,6 +543,27 @@ void MainWindow::onDetectedFrequencyClicked(QListWidgetItem* item) {
 
 void MainWindow::activeFreqCleanup() {
     detectedFrequenciesList->clear();
+}
+
+void MainWindow::appendLog(QString text) {
+    if (!logTextEdit) {
+        return;
+    }
+    logTextEdit->appendPlainText(text);
+    QTextCursor c = logTextEdit->textCursor();
+    c.movePosition(QTextCursor::End);
+    logTextEdit->setTextCursor(c);
+    QString content = logTextEdit->toPlainText();
+    int lineCount = content.count('\n') + (content.isEmpty() ? 0 : 1);
+    if (lineCount > maxLogLines) {
+        int removeCount = lineCount - maxLogLines;
+        int pos = 0;
+        for (int i = 0; i < removeCount && pos < content.size(); ++i) {
+            int next = content.indexOf('\n', pos);
+            pos = (next >= 0) ? next + 1 : content.size();
+        }
+        logTextEdit->setPlainText(content.mid(pos));
+    }
 }
 
 void MainWindow::setupVolumeSliderConnection() {
