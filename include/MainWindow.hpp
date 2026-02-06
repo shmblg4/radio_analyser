@@ -47,6 +47,7 @@ public slots:
 
 private slots:
     void updateSpectrum();
+    void updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq_samples);
     void applyConfig();
     void updateAveragePower();
     void scanActive();
@@ -75,6 +76,7 @@ private:
     void updateDetectedFrequenciesList();
     void updatePlotTheme(bool dark);
     bool isNearExistingFrequency(double newFreq, double& existingFreq);
+    void refreshSpectrumPlot();
 
     std::unique_ptr<HackrfDevice> device;
     hackrf_alloc_params alloc_params;

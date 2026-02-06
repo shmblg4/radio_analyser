@@ -195,6 +195,11 @@ std::vector<std::complex<float>> HackrfDevice::getIQSamplesForProcessing() {
 
 std::vector<double> HackrfDevice::getMagnitudeSpectrum() {
     auto iq_samples = getIQSamplesForProcessing();
+    return getMagnitudeSpectrumFromIQ(iq_samples);
+}
+
+std::vector<double> HackrfDevice::getMagnitudeSpectrumFromIQ(
+    const std::vector<std::complex<float>> &iq_samples) {
     if (iq_samples.empty()) {
         return std::vector<double>(__alloc_params__.fft_size, -200.0);
     }

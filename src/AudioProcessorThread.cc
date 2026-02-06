@@ -111,8 +111,10 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         }
     }
 
-    const int filter_length = static_cast<int>(sample_rate / 4000.0);
-    const int actual_filter_length = (filter_length > 1) ? filter_length : 1;
+    const double voice_cutoff_hz = 4000.0;
+    int filter_length = static_cast<int>(sample_rate / voice_cutoff_hz);
+    if (filter_length < 1) filter_length = 1;
+    const int actual_filter_length = filter_length;
     std::vector<float> filtered_demod;
     filtered_demod.reserve(demod.size());
     
@@ -143,11 +145,15 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     }
 
     const float minPeak = 100.0f;
-    float scale = 1.0f;
+    const float strongScale = 0.8f;
+    const float weakScaleFraction = 0.4f;
+    float scale;
     if (maxVal > minPeak) {
-        scale = static_cast<float>(std::numeric_limits<int16_t>::max()) * 0.8f / maxVal;
+        scale = static_cast<float>(std::numeric_limits<int16_t>::max()) * strongScale / maxVal;
+    } else if (maxVal > 1.0f) {
+        scale = static_cast<float>(std::numeric_limits<int16_t>::max()) * weakScaleFraction / maxVal;
     } else {
-        scale = static_cast<float>(std::numeric_limits<int16_t>::max()) * 0.1f / minPeak;
+        scale = static_cast<float>(std::numeric_limits<int16_t>::max()) * weakScaleFraction;
     }
 
     for (size_t i = 0; i < filtered_demod.size(); i += static_cast<size_t>(decim)) {

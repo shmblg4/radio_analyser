@@ -198,9 +198,22 @@ MainWindow::~MainWindow() {
 void MainWindow::updateSpectrum() {
     if (!device)
         return;
+    if (listeningActive)
+        return;
 
     spectrum_db = device->getMagnitudeSpectrum();
+    refreshSpectrumPlot();
+}
 
+void MainWindow::updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq_samples) {
+    if (!device || iq_samples.empty())
+        return;
+
+    spectrum_db = device->getMagnitudeSpectrumFromIQ(iq_samples);
+    refreshSpectrumPlot();
+}
+
+void MainWindow::refreshSpectrumPlot() {
     if (spectrum_db.size() != static_cast<size_t>(fftSize)) {
         return;
     }

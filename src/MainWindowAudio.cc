@@ -110,8 +110,9 @@ void MainWindow::processAudio() {
 
     const double in_sample_rate = alloc_params.sample_rate;
     const int audio_rate = audioSampleRate;
-    
+
     audioProcessorThread->processIQSamples(iq_samples, in_sample_rate, audio_rate);
+    updateSpectrumFromIQ(iq_samples);
 #endif
 }
 
