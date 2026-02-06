@@ -22,7 +22,9 @@ file(GLOB_RECURSE SRC_FILES ${PROJECT_SOURCE_DIR}/src/*.cc)
 add_executable(
     radio_analyser 
     include/MainWindow.hpp 
-    include/AudioProcessorThread.hpp ${SOURCES} ${SRC_FILES})
+    include/AudioProcessorThread.hpp 
+    include/SpectrumWorker.hpp 
+    ${SOURCES} ${SRC_FILES})
 
 find_package(spdlog REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport)

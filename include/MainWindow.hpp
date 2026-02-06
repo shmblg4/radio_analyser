@@ -34,6 +34,8 @@
 class QAudioFormat;
 class QAudioSink;
 class AudioProcessorThread;
+class SpectrumWorker;
+class QThread;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -48,6 +50,7 @@ public slots:
 private slots:
     void updateSpectrum();
     void updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq_samples);
+    void onSpectrumReady(std::vector<double> spectrum_db);
     void applyConfig();
     void updateAveragePower();
     void scanActive();
@@ -144,6 +147,9 @@ private:
     QByteArray audioBuffer;
     int audioSampleRate = 48000;
     AudioProcessorThread *audioProcessorThread = nullptr;
+
+    SpectrumWorker *spectrumWorker_ = nullptr;
+    QThread *spectrumThread_ = nullptr;
 
 private slots:
     void setDarkTheme();

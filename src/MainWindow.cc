@@ -1,7 +1,11 @@
 #include "MainWindow.hpp"
 #include "AudioProcessorThread.hpp"
 #include "LogSink.hpp"
+#include "SpectrumWorker.hpp"
 #include "radio_scanner.hpp"
+
+#include <QMetaObject>
+#include <QThread>
 
 #ifdef HAVE_QT_AUDIO
 #include <QtMultimedia/QAudioFormat>
@@ -170,6 +174,15 @@ MainWindow::MainWindow(QWidget *parent)
         return;
     }
 
+    qRegisterMetaType<std::vector<double>>("std::vector<double>");
+    spectrumWorker_ = new SpectrumWorker(this);
+    spectrumWorker_->setDevice(device.get());
+    spectrumThread_ = new QThread(this);
+    spectrumWorker_->moveToThread(spectrumThread_);
+    connect(spectrumWorker_, &SpectrumWorker::spectrumReady,
+            this, &MainWindow::onSpectrumReady, Qt::QueuedConnection);
+    spectrumThread_->start();
+
     connect(spectrumUpdateTimer, &QTimer::timeout, this,
             &MainWindow::updateSpectrum);
     spectrumUpdateTimer->start(50);
@@ -181,12 +194,16 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
-    if (device) {
-        device->stopRx();
-    }
     spectrumUpdateTimer->stop();
     averagePowerLevelTimer->stop();
     scanActiveTimer->stop();
+    if (spectrumThread_) {
+        spectrumThread_->quit();
+        spectrumThread_->wait();
+    }
+    if (device) {
+        device->stopRx();
+    }
 #ifdef HAVE_QT_AUDIO
     if (audioProcessorThread) {
         audioProcessorThread->stopProcessing();
@@ -200,8 +217,14 @@ void MainWindow::updateSpectrum() {
         return;
     if (listeningActive)
         return;
+    if (!spectrumWorker_)
+        return;
 
-    spectrum_db = device->getMagnitudeSpectrum();
+    QMetaObject::invokeMethod(spectrumWorker_, "computeSpectrum", Qt::QueuedConnection);
+}
+
+void MainWindow::onSpectrumReady(std::vector<double> result) {
+    spectrum_db = std::move(result);
     refreshSpectrumPlot();
 }
 
