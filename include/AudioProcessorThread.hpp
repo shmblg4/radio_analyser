@@ -5,6 +5,7 @@
 #include <QObject>
 #include <complex>
 #include <vector>
+#include <deque>
 #include <mutex>
 #include <atomic>
 
@@ -19,6 +20,7 @@ public:
                          double sample_rate, int audio_rate);
     void stopProcessing();
     void resetDCAccumulator();
+    void clearPendingQueue();
 
 signals:
     void audioSamplesReady(const std::vector<int16_t> &samples);
@@ -37,8 +39,9 @@ private:
         bool valid = false;
     };
 
+    static constexpr size_t kMaxPendingChunks = 4;
     std::mutex data_mutex_;
-    ProcessingData pending_data_;
+    std::deque<ProcessingData> pending_queue_;
     std::atomic<bool> running_{false};
     std::atomic<bool> should_stop_{false};
     

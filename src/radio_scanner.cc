@@ -116,7 +116,8 @@ bool HackrfDevice::_configure_device() {
                       hackrf_error_name((hackrf_error)result));
         return false;
     }
-    result = hackrf_set_baseband_filter_bandwidth(__dev__, __alloc_params__.bandwidth);
+    uint32_t bw_hz = hackrf_compute_baseband_filter_bw(__alloc_params__.bandwidth);
+    result = hackrf_set_baseband_filter_bandwidth(__dev__, bw_hz);
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to set bandwidth: {}",
                       hackrf_error_name((hackrf_error)result));

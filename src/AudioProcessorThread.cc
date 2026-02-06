@@ -23,17 +23,28 @@ void AudioProcessorThread::resetDCAccumulator() {
     dc_accumulator_ = 0.0f;
 }
 
+void AudioProcessorThread::clearPendingQueue() {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    pending_queue_.clear();
+}
+
 void AudioProcessorThread::processIQSamples(const std::vector<std::complex<float>> &iq_samples,
                                            double sample_rate, int audio_rate) {
-    if (should_stop_) {
+    if (should_stop_ || iq_samples.empty()) {
         return;
     }
 
+    ProcessingData data;
+    data.iq_samples = iq_samples;
+    data.sample_rate = sample_rate;
+    data.audio_rate = audio_rate;
+    data.valid = true;
+
     std::lock_guard<std::mutex> lock(data_mutex_);
-    pending_data_.iq_samples = iq_samples;
-    pending_data_.sample_rate = sample_rate;
-    pending_data_.audio_rate = audio_rate;
-    pending_data_.valid = true;
+    if (pending_queue_.size() >= kMaxPendingChunks) {
+        pending_queue_.pop_front();
+    }
+    pending_queue_.push_back(std::move(data));
 }
 
 void AudioProcessorThread::run() {
@@ -46,9 +57,9 @@ void AudioProcessorThread::run() {
 
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
-            if (pending_data_.valid) {
-                data = pending_data_;
-                pending_data_.valid = false;
+            if (!pending_queue_.empty()) {
+                data = std::move(pending_queue_.front());
+                pending_queue_.pop_front();
                 has_data = true;
             }
         }
@@ -61,7 +72,7 @@ void AudioProcessorThread::run() {
                 emit audioSamplesReady(audio_samples);
             }
         } else {
-            msleep(5);
+            msleep(2);
         }
     }
 
@@ -89,13 +100,27 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     demod.reserve(iq_samples.size());
 
     const float phase_scale = static_cast<float>(sample_rate) / (2.0f * M_PI);
+    const float limiter_threshold = 0.02f;
     std::complex<float> prev = iq_samples[0];
+    float prev_mag = std::abs(prev);
+    if (prev_mag > limiter_threshold) {
+        prev /= prev_mag;
+    } else {
+        prev = std::complex<float>(0.0f, 0.0f);
+    }
     for (size_t i = 1; i < iq_samples.size(); ++i) {
         std::complex<float> curr = iq_samples[i];
-        std::complex<float> diff = curr * std::conj(prev);
-        float angle = std::atan2(diff.imag(), diff.real());
-        demod.push_back(angle * phase_scale);
-        prev = curr;
+        float curr_mag = std::abs(curr);
+        if (curr_mag > limiter_threshold) {
+            curr /= curr_mag;
+            std::complex<float> diff = curr * std::conj(prev);
+            float angle = std::atan2(diff.imag(), diff.real());
+            demod.push_back(angle * phase_scale);
+            prev = curr;
+        } else {
+            demod.push_back(0.0f);
+            prev = std::complex<float>(0.0f, 0.0f);
+        }
     }
 
     if (demod.empty()) {
@@ -114,23 +139,27 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     const double voice_cutoff_hz = 4000.0;
     int filter_length = static_cast<int>(sample_rate / voice_cutoff_hz);
     if (filter_length < 1) filter_length = 1;
-    const int actual_filter_length = filter_length;
+    const int half = filter_length / 2;
+    const int n = static_cast<int>(demod.size());
     std::vector<float> filtered_demod;
     filtered_demod.reserve(demod.size());
-    
-    for (size_t i = 0; i < demod.size(); ++i) {
-        float sum = 0.0f;
-        int count = 0;
-        int start = static_cast<int>(i) - actual_filter_length / 2;
-        int end = static_cast<int>(i) + actual_filter_length / 2;
-        start = (start < 0) ? 0 : start;
-        end = (end >= static_cast<int>(demod.size())) ? static_cast<int>(demod.size() - 1) : end;
-        
-        for (int j = start; j <= end; ++j) {
-            sum += demod[j];
-            count++;
+
+    float running_sum = 0.0f;
+    int run_count = 0;
+    for (int j = 0; j <= half && j < n; ++j) {
+        running_sum += demod[static_cast<size_t>(j)];
+        run_count++;
+    }
+    for (int i = 0; i < n; ++i) {
+        filtered_demod.push_back(run_count > 0 ? running_sum / run_count : 0.0f);
+        if (i >= half) {
+            running_sum -= demod[static_cast<size_t>(i - half)];
+            run_count--;
         }
-        filtered_demod.push_back(sum / count);
+        if (i + half + 1 < n) {
+            running_sum += demod[static_cast<size_t>(i + half + 1)];
+            run_count++;
+        }
     }
 
     std::vector<int16_t> audioSamples;

@@ -24,8 +24,10 @@ void MainWindow::toggleListening() {
 
         alloc_params.center_freq =
             static_cast<uint64_t>(frequencySpinBox->value() * 1e6);
-        alloc_params.sample_rate = 192000.0;
-        alloc_params.bandwidth = static_cast<uint32_t>(25e3);
+        alloc_params.sample_rate = 2000000.0;
+        alloc_params.bandwidth = 1750000u;
+        alloc_params.vga_gain = vgaSlider->value();
+        alloc_params.lna_gain = lnaSlider->value();
 
         device->stopRx();
         if (!device->configure(alloc_params) || !device->startRx()) {
@@ -46,16 +48,26 @@ void MainWindow::toggleListening() {
             listeningActive = false;
             return;
         }
-        if (!audioIODevice) {
+        if (!audioSink) {
             QMessageBox::warning(this, tr("Ошибка"),
                                 tr("Аудио устройство не инициализировано. Попробуйте перезапустить приложение."));
             listeningActive = false;
             return;
         }
+        if (!audioIODevice) {
+            audioIODevice = audioSink->start();
+            if (!audioIODevice) {
+                QMessageBox::warning(this, tr("Ошибка"),
+                                    tr("Не удалось открыть аудио устройство для воспроизведения."));
+                listeningActive = false;
+                return;
+            }
+        }
         spdlog::info("Starting audio processing: freq={} Hz, sample_rate={} Hz, bandwidth={} Hz",
                     alloc_params.center_freq, alloc_params.sample_rate, alloc_params.bandwidth);
         if (audioProcessorThread) {
             audioProcessorThread->resetDCAccumulator();
+            audioProcessorThread->clearPendingQueue();
         }
         audioTimer->start(20);
 #else
@@ -72,16 +84,13 @@ void MainWindow::toggleListening() {
             audioTimer->stop();
 #ifdef HAVE_QT_AUDIO
         if (audioSink) {
-            float savedVolume = audioSink->volume();
             audioSink->stop();
-            audioIODevice = audioSink->start();
-            if (audioIODevice) {
-                audioSink->setVolume(savedVolume);
-            }
+            audioIODevice = nullptr;
         }
         audioBuffer.clear();
         if (audioProcessorThread) {
             audioProcessorThread->resetDCAccumulator();
+            audioProcessorThread->clearPendingQueue();
         }
 #endif
     }
@@ -118,7 +127,7 @@ void MainWindow::processAudio() {
 
 void MainWindow::onAudioSamplesReady(const std::vector<int16_t> &samples) {
 #ifdef HAVE_QT_AUDIO
-    if (!audioIODevice || samples.empty()) {
+    if (!listeningActive || !audioIODevice || samples.empty()) {
         return;
     }
 
