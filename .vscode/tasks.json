@@ -1,0 +1,39 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Configure (Debug)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-DCMAKE_BUILD_TYPE=Debug", // Принудительно включаем отладку
+                "-S",
+                "${workspaceFolder}",
+                "-B",
+                "${workspaceFolder}/build"
+            ],
+            "group": "build",
+            "detail": "Генерация файлов сборки с флагами отладки"
+        },
+        {
+            "label": "Build Debug Project", // Имя таска, которое укажем в launch.json
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--parallel", // Ускоряем сборку (использует все ядра Pi 5)
+                "4"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "dependsOn": [
+                "CMake: Configure (Debug)"
+            ], // Сначала конфигурируем, потом собираем
+            "problemMatcher": "$gcc",
+            "detail": "Сборка проекта"
+        }
+    ]
+}
