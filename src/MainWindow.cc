@@ -43,6 +43,7 @@ MainWindow::MainWindow(QWidget *parent)
       listeningFrequencyLabel(nullptr),
       detectedFrequenciesGroup(nullptr),
       detectedFrequenciesList(nullptr),
+      clearDetectedButton(nullptr),
       plotModeAction(nullptr),
       viewToolBar(nullptr) {
 
@@ -366,6 +367,8 @@ void MainWindow::applyConfig() {
     bool success = device->configure(alloc_params);
 
     if (success) {
+        detectedFrequencies.clear();
+        updateDetectedFrequenciesList();
         setupPlot();
         device->startRx();
         spdlog::info("Configuration applied successfully.");
@@ -478,49 +481,61 @@ void MainWindow::scanActive() {
     }
 
     const int total_bins = static_cast<int>(spectrum_db.size());
-    const double freq_resolution_hz = alloc_params.sample_rate / fftSize;
-    constexpr double subband_width_hz = 25000.0;  // LPD channel width 25 kHz
-    int bins_per_subband = static_cast<int>(std::round(subband_width_hz / freq_resolution_hz));
-    if (bins_per_subband < 1) {
-        bins_per_subband = 1;
-    }
-    if (bins_per_subband > total_bins) {
-        bins_per_subband = total_bins;
-    }
-
-    std::vector<double> subband_power;
-    subband_power.reserve((total_bins + bins_per_subband - 1) / bins_per_subband);
-    for (int start_idx = 0; start_idx + bins_per_subband <= total_bins;
-         start_idx += bins_per_subband) {
-        double sum_in_subband = 0.0;
-        for (int i = start_idx; i < start_idx + bins_per_subband; ++i) {
-            sum_in_subband += spectrum_db[i];
-        }
-        subband_power.push_back(sum_in_subband / bins_per_subband);
-    }
-
     const double power_threshold = average_power / 2.0 + threshold;
-    const int num_subbands = static_cast<int>(subband_power.size());
 
-    for (int k = 0; k < num_subbands; ++k) {
-        if (subband_power[k] <= power_threshold) {
+    // Сглаживание спектра (окно ~канал 25 кГц), чтобы один пик давал одну точку
+    const double freq_resolution_hz = alloc_params.sample_rate / fftSize;
+    constexpr double channel_width_hz = 25000.0;
+    int smooth_half = static_cast<int>(std::round(0.5 * channel_width_hz / freq_resolution_hz));
+    smooth_half = std::clamp(smooth_half, 2, total_bins / 4);
+    const int smooth_win = 2 * smooth_half + 1;
+
+    std::vector<double> smoothed(total_bins, 0.0);
+    for (int i = 0; i < total_bins; ++i) {
+        int lo = std::max(0, i - smooth_half);
+        int hi = std::min(total_bins, i + smooth_half + 1);
+        double sum = 0.0;
+        for (int j = lo; j < hi; ++j) {
+            sum += spectrum_db[j];
+        }
+        smoothed[i] = sum / (hi - lo);
+    }
+
+    // Строгие локальные максимумы по бинам (один пик — одна точка)
+    struct Peak { int bin; double power; };
+    std::vector<Peak> raw_peaks;
+    for (int i = 1; i < total_bins - 1; ++i) {
+        if (smoothed[i] <= power_threshold) {
             continue;
         }
-        bool is_local_max = true;
-        if (k > 0 && subband_power[k] < subband_power[k - 1]) {
-            is_local_max = false;
+        if (smoothed[i] >= smoothed[i - 1] && smoothed[i] >= smoothed[i + 1]) {
+            raw_peaks.push_back({i, smoothed[i]});
         }
-        if (k + 1 < num_subbands && subband_power[k] < subband_power[k + 1]) {
-            is_local_max = false;
-        }
-        if (!is_local_max) {
-            continue;
-        }
+    }
 
-        const int start_idx = k * bins_per_subband;
-        const int center_bin = start_idx + bins_per_subband / 2;
-        const double detected_freq_mhz = x_axis_values[center_bin];
+    // Объединяем пики в пределах одного канала (25 кГц): оставляем один с макс. мощностью
+    const double merge_mhz = FREQUENCY_TOLERANCE_MHZ;
+    std::vector<double> new_peaks_mhz;
+    for (size_t p = 0; p < raw_peaks.size(); ) {
+        int best_bin = raw_peaks[p].bin;
+        double best_power = raw_peaks[p].power;
+        double freq_mhz = x_axis_values[best_bin];
+        size_t q = p + 1;
+        while (q < raw_peaks.size() &&
+               std::abs(x_axis_values[raw_peaks[q].bin] - freq_mhz) <= merge_mhz) {
+            if (raw_peaks[q].power > best_power) {
+                best_power = raw_peaks[q].power;
+                best_bin = raw_peaks[q].bin;
+                freq_mhz = x_axis_values[best_bin];
+            }
+            ++q;
+        }
+        new_peaks_mhz.push_back(x_axis_values[best_bin]);
+        p = q;
+    }
 
+    // Обновляем список задетектированных: слияние с уже известными или добавление
+    for (double detected_freq_mhz : new_peaks_mhz) {
         double existing_freq = 0.0;
         if (isNearExistingFrequency(detected_freq_mhz, existing_freq)) {
             auto it = std::find(detectedFrequencies.begin(), detectedFrequencies.end(), existing_freq);
@@ -578,7 +593,8 @@ void MainWindow::onDetectedFrequencyClicked(QListWidgetItem* item) {
 }
 
 void MainWindow::activeFreqCleanup() {
-    detectedFrequenciesList->clear();
+    detectedFrequencies.clear();
+    updateDetectedFrequenciesList();
 }
 
 void MainWindow::appendLog(QString text) {

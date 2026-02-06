@@ -126,6 +126,7 @@ private:
 
     QGroupBox *detectedFrequenciesGroup;
     QListWidget *detectedFrequenciesList;
+    QPushButton *clearDetectedButton;
 
     QGroupBox *info;
     QLabel *averagePowerLabel;

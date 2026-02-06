@@ -270,6 +270,11 @@ void MainWindow::setupLayout() {
         }
         
         detectedFreqLayout->addWidget(detectedFrequenciesList);
+        if (!clearDetectedButton) {
+            clearDetectedButton = new QPushButton(tr("Очистить список"), this);
+            connect(clearDetectedButton, &QPushButton::clicked, this, &MainWindow::activeFreqCleanup);
+        }
+        detectedFreqLayout->addWidget(clearDetectedButton);
         detectedFrequenciesGroup->setLayout(detectedFreqLayout);
     }
 
