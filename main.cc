@@ -9,7 +9,7 @@ int main(int argc, char *argv[]) {
 
     MainWindow w;
     w.applyTheme(true);
-    w.show();
+    w.showMaximized();
 
     return a.exec();
 }

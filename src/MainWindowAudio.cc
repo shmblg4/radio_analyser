@@ -24,8 +24,10 @@ void MainWindow::toggleListening() {
 
         alloc_params.center_freq =
             static_cast<uint64_t>(frequencySpinBox->value() * 1e6);
-        alloc_params.sample_rate = 2000000.0;
-        alloc_params.bandwidth = 1750000u;
+        alloc_params.sample_rate =
+            static_cast<double>(sampleRateSpinBox->value() * 1e6);
+        alloc_params.bandwidth =
+            static_cast<uint32_t>(bandwidthSpinBox->value() * 1e6);
         alloc_params.vga_gain = vgaSlider->value();
         alloc_params.lna_gain = lnaSlider->value();
 
@@ -38,6 +40,8 @@ void MainWindow::toggleListening() {
         }
         
         setupPlot();
+        updateDspMetricsInfo();
+        logBaselineMetrics("startListening");
 
         if (listenToggleButton)
             listenToggleButton->setText(tr("Стоп прослушивания"));
@@ -66,7 +70,7 @@ void MainWindow::toggleListening() {
         spdlog::info("Starting audio processing: freq={} Hz, sample_rate={} Hz, bandwidth={} Hz",
                     alloc_params.center_freq, alloc_params.sample_rate, alloc_params.bandwidth);
         if (audioProcessorThread) {
-            audioProcessorThread->resetDCAccumulator();
+            audioProcessorThread->resetDSPState();
             audioProcessorThread->clearPendingQueue();
         }
         audioTimer->start(20);
@@ -89,13 +93,14 @@ void MainWindow::toggleListening() {
         }
         audioBuffer.clear();
         if (audioProcessorThread) {
-            audioProcessorThread->resetDCAccumulator();
+            audioProcessorThread->resetDSPState();
             audioProcessorThread->clearPendingQueue();
         }
 #endif
     }
 
     updateListeningParameterControls();
+    updateDspMetricsInfo();
     if (listeningStatusLabel || listeningFrequencyLabel) {
         updateListeningStatus();
     }
@@ -107,7 +112,8 @@ void MainWindow::processAudio() {
         return;
     }
 
-    auto iq_samples = device->getIQSamplesForProcessing();
+    // For exact-tuned channels, IQ DC removal can suppress the wanted carrier.
+    auto iq_samples = device->getIQSamplesForProcessing(false);
     if (iq_samples.size() < 2) {
         return;
     }
@@ -120,8 +126,11 @@ void MainWindow::processAudio() {
     const double in_sample_rate = alloc_params.sample_rate;
     const int audio_rate = audioSampleRate;
 
-    audioProcessorThread->processIQSamples(iq_samples, in_sample_rate, audio_rate);
+    // Update spectrum display first (before moving the data)
     updateSpectrumFromIQ(iq_samples);
+    
+    // Then send to audio processor using move semantics
+    audioProcessorThread->processIQSamples(std::move(iq_samples), in_sample_rate, audio_rate);
 #endif
 }
 

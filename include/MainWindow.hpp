@@ -29,7 +29,7 @@
 #include <deque>
 #include <memory>
 #include <vector>
-#include <algorithm>
+#include <cmath>
 
 class QAudioFormat;
 class QAudioSink;
@@ -80,14 +80,20 @@ private:
     void updatePlotTheme(bool dark);
     bool isNearExistingFrequency(double newFreq, double& existingFreq);
     void refreshSpectrumPlot();
+    double getRbwHz() const;
+    double getDetectionToleranceMHz() const;
+    double estimateSubBinFrequencyMHz(int bin) const;
+    void updateDspMetricsInfo();
+    void logBaselineMetrics(const char *context) const;
 
     std::unique_ptr<HackrfDevice> device;
-    hackrf_alloc_params alloc_params;
-
+    
     QTimer *spectrumUpdateTimer;
     QTimer *averagePowerLevelTimer;
     QTimer *scanActiveTimer;
     QTimer *activeFreqCleanupTimer;
+    
+    hackrf_alloc_params alloc_params;
 
     int fftSize;
     double average_power;
@@ -101,7 +107,9 @@ private:
     int waterfallHistorySize = 200;
 
     std::vector<double> detectedFrequencies;
-    static constexpr double FREQUENCY_TOLERANCE_MHZ = 0.025;  // 25 кГц — ширина канала LPD
+    static constexpr double MIN_FREQUENCY_TOLERANCE_MHZ = 0.010;
+    static constexpr double DETECTOR_CHANNEL_WIDTH_HZ = 25000.0;
+    static constexpr double MERGE_WIDTH_CHANNEL_FACTOR = 0.5;
     static constexpr size_t MAX_DETECTED_FREQUENCIES = 10;
 
     QGroupBox *controls;
@@ -129,7 +137,9 @@ private:
     QPushButton *clearDetectedButton;
 
     QGroupBox *info;
-    QLabel *averagePowerLabel;
+    QLabel *averagePowerLabel = nullptr;
+    QLabel *rbwLabel = nullptr;
+    QLabel *detectionToleranceLabel = nullptr;
 
     QGroupBox *logGroup = nullptr;
     QPlainTextEdit *logTextEdit = nullptr;

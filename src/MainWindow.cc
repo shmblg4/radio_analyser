@@ -20,7 +20,6 @@
 #include <QTextCursor>
 #include <spdlog/spdlog.h>
 #include <algorithm>
-#include <limits>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
@@ -98,8 +97,12 @@ MainWindow::MainWindow(QWidget *parent)
     controls->setFixedWidth(300);
 
     QVBoxLayout *infoLayout = new QVBoxLayout;
-    infoLayout->addWidget(new QLabel(tr("Average Power (dB):")));
+    infoLayout->addWidget(new QLabel(tr("Average Power (dBFS):")));
     infoLayout->addWidget(averagePowerLabel);
+    infoLayout->addWidget(new QLabel(tr("RBW (Hz/bin):")));
+    infoLayout->addWidget(rbwLabel);
+    infoLayout->addWidget(new QLabel(tr("Detection Tolerance (kHz):")));
+    infoLayout->addWidget(detectionToleranceLabel);
     infoLayout->addStretch();
     info->setLayout(infoLayout);
     info->setFixedWidth(300);
@@ -156,6 +159,8 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
 
     setupPlot();
+    updateDspMetricsInfo();
+    logBaselineMetrics("startup");
     setMinimumSize(1100, 700);
     resize(1200, 800);
     try {
@@ -246,7 +251,7 @@ void MainWindow::refreshSpectrumPlot() {
     static uint64_t last_center_freq = 0;
     static int last_fft_size = 0;
 
-    double freq_resolution_hz = alloc_params.sample_rate / fftSize;
+    double freq_resolution_hz = getRbwHz();
     double start_freq_hz =
         (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
     double end_freq_hz =
@@ -270,6 +275,7 @@ void MainWindow::refreshSpectrumPlot() {
         last_sample_rate = alloc_params.sample_rate;
         last_center_freq = alloc_params.center_freq;
         last_fft_size = fftSize;
+        updateDspMetricsInfo();
     }
 
     if (currentPlotMode == PlotMode::Spectrum) {
@@ -290,12 +296,8 @@ void MainWindow::refreshSpectrumPlot() {
         plot->replot();
     } else {
         QVector<double> line(fftSize);
-        double minVal = std::numeric_limits<double>::max();
-        double maxVal = std::numeric_limits<double>::lowest();
         for (int i = 0; i < fftSize; ++i) {
             line[i] = spectrum_db[i];
-            minVal = std::min(minVal, line[i]);
-            maxVal = std::max(maxVal, line[i]);
         }
 
         waterfallHistory.push_back(std::move(line));
@@ -315,6 +317,7 @@ void MainWindow::refreshSpectrumPlot() {
             data->setValueRange(QCPRange(0, waterfallHistorySize));
 
             const int rows = static_cast<int>(waterfallHistory.size());
+            constexpr double emptyCellDb = -200.0;  // значение для пустых ячеек (ниже фиксированной шкалы)
             for (int j = 0; j < waterfallHistorySize; ++j) {
                 int srcIndex = rows - 1 - j;
                 const QVector<double> *rowPtr =
@@ -323,19 +326,11 @@ void MainWindow::refreshSpectrumPlot() {
                         : nullptr;
                 for (int i = 0; i < fftSize; ++i) {
                     const bool hasRow = rowPtr && i < rowPtr->size();
-                    const double v = hasRow
-                                         ? (*rowPtr)[i]
-                                         : (minVal == std::numeric_limits<
-                                                             double>::max()
-                                                ? -200.0
-                                                : minVal);
+                    const double v = hasRow ? (*rowPtr)[i] : emptyCellDb;
                     data->setCell(i, j, v);
                 }
             }
 
-            if (waterfallColorScale) {
-                waterfallColorScale->setDataRange(QCPRange(minVal, maxVal));
-            }
             plot->replot();
         }
     }
@@ -359,9 +354,10 @@ void MainWindow::applyConfig() {
     alloc_params.fft_size = fftSize;
     fftSizeLabel->setText(QString::number(fftSize));
     windowed_samples.clear();
-    const double freq_res_hz = alloc_params.sample_rate / fftSize;
-    const int bins_per_25khz = std::max(1, static_cast<int>(std::round(25000.0 / freq_res_hz)));
-    windowed_samples.resize(bins_per_25khz);
+    const double freq_res_hz = getRbwHz();
+    const int bins_per_channel = std::max(
+        1, static_cast<int>(std::round(DETECTOR_CHANNEL_WIDTH_HZ / freq_res_hz)));
+    windowed_samples.resize(bins_per_channel);
     waterfallHistory.clear();
     device->stopRx();
     bool success = device->configure(alloc_params);
@@ -370,6 +366,8 @@ void MainWindow::applyConfig() {
         detectedFrequencies.clear();
         updateDetectedFrequenciesList();
         setupPlot();
+        updateDspMetricsInfo();
+        logBaselineMetrics("applyConfig");
         device->startRx();
         spdlog::info("Configuration applied successfully.");
         QMessageBox::information(this, "Success",
@@ -385,13 +383,15 @@ void MainWindow::updateAveragePower() {
     if (!device || spectrum_db.empty())
         return;
 
-    double sum = 0.0;
+    double linear_sum = 0.0;
     for (int i = 0; i < static_cast<int>(spectrum_db.size()); ++i) {
-        sum += spectrum_db[i];
+        linear_sum += std::pow(10.0, spectrum_db[i] / 10.0);
     }
-    average_power = sum / spectrum_db.size();
+    const double linear_avg = linear_sum / spectrum_db.size();
+    average_power = 10.0 * std::log10(linear_avg + 1e-20);
 
     averagePowerLabel->setText(QString::number(average_power, 'f', 2));
+    updateDspMetricsInfo();
 }
 
 void MainWindow::toggleDisplayMode() {
@@ -481,14 +481,14 @@ void MainWindow::scanActive() {
     }
 
     const int total_bins = static_cast<int>(spectrum_db.size());
-    const double power_threshold = average_power / 2.0 + threshold;
+    const double power_threshold = average_power + threshold;
 
-    // Сглаживание спектра (окно ~канал 25 кГц), чтобы один пик давал одну точку
-    const double freq_resolution_hz = alloc_params.sample_rate / fftSize;
-    constexpr double channel_width_hz = 25000.0;
-    int smooth_half = static_cast<int>(std::round(0.5 * channel_width_hz / freq_resolution_hz));
+    const double freq_resolution_hz = getRbwHz();
+    const double adaptive_channel_width_hz =
+        std::max(DETECTOR_CHANNEL_WIDTH_HZ, 6.0 * freq_resolution_hz);
+    int smooth_half = static_cast<int>(
+        std::round(0.5 * adaptive_channel_width_hz / freq_resolution_hz));
     smooth_half = std::clamp(smooth_half, 2, total_bins / 4);
-    const int smooth_win = 2 * smooth_half + 1;
 
     std::vector<double> smoothed(total_bins, 0.0);
     for (int i = 0; i < total_bins; ++i) {
@@ -501,7 +501,6 @@ void MainWindow::scanActive() {
         smoothed[i] = sum / (hi - lo);
     }
 
-    // Строгие локальные максимумы по бинам (один пик — одна точка)
     struct Peak { int bin; double power; };
     std::vector<Peak> raw_peaks;
     for (int i = 1; i < total_bins - 1; ++i) {
@@ -513,8 +512,7 @@ void MainWindow::scanActive() {
         }
     }
 
-    // Объединяем пики в пределах одного канала (25 кГц): оставляем один с макс. мощностью
-    const double merge_mhz = FREQUENCY_TOLERANCE_MHZ;
+    const double merge_mhz = getDetectionToleranceMHz();
     std::vector<double> new_peaks_mhz;
     for (size_t p = 0; p < raw_peaks.size(); ) {
         int best_bin = raw_peaks[p].bin;
@@ -530,7 +528,7 @@ void MainWindow::scanActive() {
             }
             ++q;
         }
-        new_peaks_mhz.push_back(x_axis_values[best_bin]);
+        new_peaks_mhz.push_back(estimateSubBinFrequencyMHz(best_bin));
         p = q;
     }
 
@@ -554,8 +552,9 @@ void MainWindow::scanActive() {
 }
 
 bool MainWindow::isNearExistingFrequency(double newFreq, double& existingFreq) {
+    const double tolerance_mhz = getDetectionToleranceMHz();
     for (auto& freq : detectedFrequencies) {
-        if (std::abs(newFreq - freq) <= FREQUENCY_TOLERANCE_MHZ) {
+        if (std::abs(newFreq - freq) <= tolerance_mhz) {
             existingFreq = freq;
             return true;
         }
@@ -643,4 +642,63 @@ void MainWindow::setupVolumeSliderConnection() {
         }
     }
 #endif
+}
+
+double MainWindow::getRbwHz() const {
+    if (fftSize <= 0) {
+        return 1.0;
+    }
+    return alloc_params.sample_rate / static_cast<double>(fftSize);
+}
+
+double MainWindow::getDetectionToleranceMHz() const {
+    const double rbw_hz = getRbwHz();
+    const double adaptive_hz = std::max(
+        MIN_FREQUENCY_TOLERANCE_MHZ * 1e6,
+        MERGE_WIDTH_CHANNEL_FACTOR * std::max(DETECTOR_CHANNEL_WIDTH_HZ, 6.0 * rbw_hz));
+    return adaptive_hz / 1e6;
+}
+
+double MainWindow::estimateSubBinFrequencyMHz(int bin) const {
+    if (bin <= 0 || bin >= fftSize - 1 ||
+        spectrum_db.size() != static_cast<size_t>(fftSize) ||
+        x_axis_values.size() != static_cast<size_t>(fftSize)) {
+        if (bin >= 0 && bin < static_cast<int>(x_axis_values.size())) {
+            return x_axis_values[static_cast<size_t>(bin)];
+        }
+        return alloc_params.center_freq / 1e6;
+    }
+
+    const double left = spectrum_db[static_cast<size_t>(bin - 1)];
+    const double center = spectrum_db[static_cast<size_t>(bin)];
+    const double right = spectrum_db[static_cast<size_t>(bin + 1)];
+    const double denom = (left - 2.0 * center + right);
+    double delta = 0.0;
+    if (std::abs(denom) > 1e-12) {
+        delta = 0.5 * (left - right) / denom;
+        delta = std::clamp(delta, -0.5, 0.5);
+    }
+
+    const double rbw_mhz = getRbwHz() / 1e6;
+    return x_axis_values[static_cast<size_t>(bin)] + delta * rbw_mhz;
+}
+
+void MainWindow::updateDspMetricsInfo() {
+    if (!rbwLabel || !detectionToleranceLabel) {
+        return;
+    }
+    const double rbw = getRbwHz();
+    const double tol_mhz = getDetectionToleranceMHz();
+    rbwLabel->setText(QString("%1").arg(rbw, 0, 'f', 1));
+    detectionToleranceLabel->setText(QString("%1")
+                                         .arg(tol_mhz * 1e3, 0, 'f', 2));
+}
+
+void MainWindow::logBaselineMetrics(const char *context) const {
+    const double rbw_hz = getRbwHz();
+    const double tolerance_hz = getDetectionToleranceMHz() * 1e6;
+    spdlog::info(
+        "DSP metrics [{}]: center={} Hz, sample_rate={} Hz, fft_size={}, rbw={} Hz/bin, detection_tolerance={} Hz",
+        context, alloc_params.center_freq, alloc_params.sample_rate, fftSize,
+        rbw_hz, tolerance_hz);
 }

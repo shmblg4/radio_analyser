@@ -16,10 +16,10 @@ public:
     explicit AudioProcessorThread(QObject *parent = nullptr);
     ~AudioProcessorThread();
 
-    void processIQSamples(const std::vector<std::complex<float>> &iq_samples, 
+    void processIQSamples(std::vector<std::complex<float>> iq_samples, 
                          double sample_rate, int audio_rate);
     void stopProcessing();
-    void resetDCAccumulator();
+    void resetDSPState();
     void clearPendingQueue();
 
 signals:
@@ -31,22 +31,45 @@ protected:
 private:
     std::vector<int16_t> processDemodulation(const std::vector<std::complex<float>> &iq_samples,
                                             double sample_rate, int audio_rate);
+    double estimateResidualCarrierHz(const std::vector<std::complex<float>> &iq_samples,
+                                     double sample_rate) const;
 
     struct ProcessingData {
         std::vector<std::complex<float>> iq_samples;
-        double sample_rate;
-        int audio_rate;
+        double sample_rate = 0.0;
+        int audio_rate = 0;
         bool valid = false;
     };
 
+    // DSP state structure - protected by dsp_state_mutex_
+    struct DSPState {
+        float dc_accumulator = 0.0f;
+        float deemphasis_state = 0.0f;
+        std::complex<float> channel_lp_state{0.0f, 0.0f};
+        double nco_phase = 0.0;
+        double residual_freq_estimate_hz = 0.0;
+        
+        void reset() {
+            dc_accumulator = 0.0f;
+            deemphasis_state = 0.0f;
+            channel_lp_state = std::complex<float>(0.0f, 0.0f);
+            nco_phase = 0.0;
+            residual_freq_estimate_hz = 0.0;
+        }
+    };
+
     static constexpr size_t kMaxPendingChunks = 4;
-    std::mutex data_mutex_;
+    
+    // Queue mutex - protects pending_queue_
+    std::mutex queue_mutex_;
     std::deque<ProcessingData> pending_queue_;
+    
+    // DSP state mutex - protects all DSP state variables
+    mutable std::mutex dsp_state_mutex_;
+    DSPState dsp_state_;
+    
     std::atomic<bool> running_{false};
     std::atomic<bool> should_stop_{false};
-    
-    float dc_accumulator_ = 0.0f;
-    std::mutex dc_mutex_;
 };
 
 #endif // AUDIOPROCESSORTHREAD_HPP

@@ -1,60 +1,262 @@
 #include "radio_scanner.hpp"
+#include "colors.hpp"
 #include <cmath>
 #include <fftw3.h>
-#include <fstream>
-#include <chrono>
-#include <sstream>
-#include <iomanip>
+#include <algorithm>
+#include <stdexcept>
+#include <unordered_map>
+
+// RAII wrapper for FFTW complex arrays
+class FFTWBuffer {
+public:
+    explicit FFTWBuffer(int size) : size_(size), data_(nullptr) {
+        if (size <= 0) {
+            throw std::invalid_argument("FFTWBuffer: size must be positive");
+        }
+        data_ = static_cast<fftw_complex*>(
+            fftw_malloc(sizeof(fftw_complex) * static_cast<size_t>(size)));
+        if (!data_) {
+            throw std::bad_alloc();
+        }
+    }
+    
+    ~FFTWBuffer() {
+        if (data_) {
+            fftw_free(data_);
+        }
+    }
+    
+    // Non-copyable
+    FFTWBuffer(const FFTWBuffer&) = delete;
+    FFTWBuffer& operator=(const FFTWBuffer&) = delete;
+    
+    // Movable
+    FFTWBuffer(FFTWBuffer&& other) noexcept : size_(other.size_), data_(other.data_) {
+        other.data_ = nullptr;
+        other.size_ = 0;
+    }
+    
+    FFTWBuffer& operator=(FFTWBuffer&& other) noexcept {
+        if (this != &other) {
+            if (data_) {
+                fftw_free(data_);
+            }
+            data_ = other.data_;
+            size_ = other.size_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+        }
+        return *this;
+    }
+    
+    fftw_complex* get() { return data_; }
+    const fftw_complex* get() const { return data_; }
+    int size() const { return size_; }
+    
+    fftw_complex& operator[](int i) { return data_[i]; }
+    const fftw_complex& operator[](int i) const { return data_[i]; }
+    
+private:
+    int size_;
+    fftw_complex* data_;
+};
+
+// RAII wrapper for FFTW plan
+class FFTWPlan {
+public:
+    FFTWPlan() : plan_(nullptr) {}
+    
+    FFTWPlan(int n, fftw_complex* in, fftw_complex* out, int sign, unsigned flags) {
+        plan_ = fftw_plan_dft_1d(n, in, out, sign, flags);
+        if (!plan_) {
+            throw std::runtime_error("Failed to create FFTW plan");
+        }
+    }
+    
+    ~FFTWPlan() {
+        if (plan_) {
+            fftw_destroy_plan(plan_);
+        }
+    }
+    
+    // Non-copyable
+    FFTWPlan(const FFTWPlan&) = delete;
+    FFTWPlan& operator=(const FFTWPlan&) = delete;
+    
+    // Movable
+    FFTWPlan(FFTWPlan&& other) noexcept : plan_(other.plan_) {
+        other.plan_ = nullptr;
+    }
+    
+    FFTWPlan& operator=(FFTWPlan&& other) noexcept {
+        if (this != &other) {
+            if (plan_) {
+                fftw_destroy_plan(plan_);
+            }
+            plan_ = other.plan_;
+            other.plan_ = nullptr;
+        }
+        return *this;
+    }
+    
+    void execute() {
+        if (plan_) {
+            fftw_execute(plan_);
+        }
+    }
+    
+    bool valid() const { return plan_ != nullptr; }
+    
+private:
+    fftw_plan plan_;
+};
+
+// Cached FFTW resources for performance
+class FFTWCache {
+public:
+    static FFTWCache& instance() {
+        static FFTWCache cache;
+        return cache;
+    }
+    
+    // Get or create cached plan and buffers for given FFT size
+    struct FFTResources {
+        fftw_complex* in;
+        fftw_complex* out;
+        fftw_plan plan;
+    };
+    
+    FFTResources getResources(int fft_size) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        auto it = cache_.find(fft_size);
+        if (it != cache_.end()) {
+            return {it->second.in, it->second.out, it->second.plan};
+        }
+        
+        // Create new resources
+        CachedEntry entry;
+        entry.in = static_cast<fftw_complex*>(
+            fftw_malloc(sizeof(fftw_complex) * static_cast<size_t>(fft_size)));
+        entry.out = static_cast<fftw_complex*>(
+            fftw_malloc(sizeof(fftw_complex) * static_cast<size_t>(fft_size)));
+        
+        if (!entry.in || !entry.out) {
+            if (entry.in) fftw_free(entry.in);
+            if (entry.out) fftw_free(entry.out);
+            throw std::bad_alloc();
+        }
+        
+        entry.plan = fftw_plan_dft_1d(fft_size, entry.in, entry.out, 
+                                       FFTW_FORWARD, FFTW_MEASURE);
+        if (!entry.plan) {
+            fftw_free(entry.in);
+            fftw_free(entry.out);
+            throw std::runtime_error("Failed to create FFTW plan");
+        }
+        
+        FFTResources result = {entry.in, entry.out, entry.plan};
+        cache_[fft_size] = std::move(entry);
+        return result;
+    }
+    
+    ~FFTWCache() {
+        for (auto& pair : cache_) {
+            if (pair.second.plan) fftw_destroy_plan(pair.second.plan);
+            if (pair.second.in) fftw_free(pair.second.in);
+            if (pair.second.out) fftw_free(pair.second.out);
+        }
+    }
+    
+private:
+    FFTWCache() = default;
+    FFTWCache(const FFTWCache&) = delete;
+    FFTWCache& operator=(const FFTWCache&) = delete;
+    
+    struct CachedEntry {
+        fftw_complex* in = nullptr;
+        fftw_complex* out = nullptr;
+        fftw_plan plan = nullptr;
+        
+        CachedEntry() = default;
+        CachedEntry(CachedEntry&& other) noexcept 
+            : in(other.in), out(other.out), plan(other.plan) {
+            other.in = nullptr;
+            other.out = nullptr;
+            other.plan = nullptr;
+        }
+        CachedEntry& operator=(CachedEntry&& other) noexcept {
+            if (this != &other) {
+                in = other.in;
+                out = other.out;
+                plan = other.plan;
+                other.in = nullptr;
+                other.out = nullptr;
+                other.plan = nullptr;
+            }
+            return *this;
+        }
+    };
+    
+    std::mutex mutex_;
+    std::unordered_map<int, CachedEntry> cache_;
+};
 
 std::vector<double>
 performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
                           int fft_size) {
+    if (fft_size <= 0) {
+        return {};
+    }
+    
     if (input.empty()) {
-        return std::vector<double>(fft_size, 0.0);
+        return std::vector<double>(static_cast<size_t>(fft_size), 0.0);
     }
 
     std::vector<std::complex<float>> samples = input;
     if (static_cast<int>(samples.size()) > fft_size) {
-        samples.resize(fft_size);
+        samples.resize(static_cast<size_t>(fft_size));
     } else if (static_cast<int>(samples.size()) < fft_size) {
-        samples.resize(fft_size, std::complex<float>(0.0f, 0.0f));
+        samples.resize(static_cast<size_t>(fft_size), std::complex<float>(0.0f, 0.0f));
     }
 
-    for (int i = 0; i < static_cast<int>(samples.size()); ++i) {
-        float window =
-            0.5f * (1.0f - std::cos(2.0f * M_PI * i / (samples.size() - 1)));
-        samples[i] *= window;
+    const int sample_count = static_cast<int>(samples.size());
+    if (sample_count > 1) {
+        // Apply Hann window
+        const double pi2 = 2.0 * M_PI;
+        const double denom = static_cast<double>(sample_count - 1);
+        for (int i = 0; i < sample_count; ++i) {
+            float window = static_cast<float>(0.5 * (1.0 - std::cos(pi2 * i / denom)));
+            samples[static_cast<size_t>(i)] *= window;
+        }
     }
 
-    fftw_complex *in, *out;
-    fftw_plan p;
-
-    in = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * fft_size);
-    out = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * fft_size);
-
+    // Use cached FFTW resources
+    auto resources = FFTWCache::instance().getResources(fft_size);
+    
+    // Copy input data
     for (int i = 0; i < fft_size; ++i) {
-        in[i][0] = samples[i].real();
-        in[i][1] = samples[i].imag();
+        resources.in[i][0] = static_cast<double>(samples[static_cast<size_t>(i)].real());
+        resources.in[i][1] = static_cast<double>(samples[static_cast<size_t>(i)].imag());
     }
     
-    p = fftw_plan_dft_1d(fft_size, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+    // Execute FFT
+    fftw_execute(resources.plan);
 
-    fftw_execute(p);
-
-    std::vector<double> magnitudes(fft_size);
+    // Calculate magnitudes
+    std::vector<double> magnitudes(static_cast<size_t>(fft_size));
     for (int i = 0; i < fft_size; ++i) {
-        magnitudes[i] =
-            std::sqrt(out[i][0] * out[i][0] + out[i][1] * out[i][1]);
+        const double re = resources.out[i][0];
+        const double im = resources.out[i][1];
+        magnitudes[static_cast<size_t>(i)] = std::sqrt(re * re + im * im);
     }
 
-    int half_size = fft_size / 2;
+    // FFT shift: swap halves to center DC
+    const int half_size = fft_size / 2;
     for (int i = 0; i < half_size; ++i) {
-        std::swap(magnitudes[i], magnitudes[i + half_size]);
+        std::swap(magnitudes[static_cast<size_t>(i)], 
+                  magnitudes[static_cast<size_t>(i + half_size)]);
     }
-
-    fftw_destroy_plan(p);
-    fftw_free(in);
-    fftw_free(out);
 
     return magnitudes;
 }
@@ -62,135 +264,194 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
 HackrfDevice::HackrfDevice() {
     auto result = hackrf_init();
     if (result != HACKRF_SUCCESS) {
-        throw std::runtime_error("Init error");
+        throw std::runtime_error(
+            std::string("HackRF init failed: ") + 
+            hackrf_error_name(static_cast<hackrf_error>(result)));
     }
 
-    result = hackrf_open(&__dev__);
+    result = hackrf_open(&device_);
     if (result != HACKRF_SUCCESS) {
-        throw std::runtime_error("Device open error");
+        hackrf_exit();
+        throw std::runtime_error(
+            std::string("HackRF open failed: ") + 
+            hackrf_error_name(static_cast<hackrf_error>(result)));
     }
-    spdlog::info("Device opened");
+    spdlog::info("HackRF device opened successfully");
 }
 
 HackrfDevice::~HackrfDevice() {
-    if (__running__.load()) {
+    if (running_.load()) {
         stopRx();
     }
-    hackrf_close(__dev__);
+    if (device_) {
+        hackrf_close(device_);
+    }
     hackrf_exit();
-    spdlog::info("Device closed");
+    spdlog::info("HackRF device closed");
 }
 
-bool HackrfDevice::configure(hackrf_alloc_params alloc_params) {
-   __alloc_params__ = alloc_params;
-    return _configure_device();
+bool HackrfDevice::configure(const hackrf_alloc_params& alloc_params) {
+    alloc_params_ = alloc_params;
+    return configureDevice();
 }
 
-bool HackrfDevice::_configure_device() {
+bool HackrfDevice::configureDevice() {
+    if (!device_) {
+        spdlog::error("Cannot configure: device is null");
+        return false;
+    }
+    
     {
-        std::lock_guard<std::mutex> lock(__dc_mutex__);
-        __dc_i_accumulator__ = 0.0f;
-        __dc_q_accumulator__ = 0.0f;
+        std::lock_guard<std::mutex> lock(dc_mutex_);
+        dc_i_accumulator_ = 0.0f;
+        dc_q_accumulator_ = 0.0f;
     }
-    auto result = hackrf_set_freq(__dev__, __alloc_params__.center_freq);
+    
+    auto result = hackrf_set_freq(device_, alloc_params_.center_freq);
     if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set frequency: {}",
-                      hackrf_error_name((hackrf_error)result));
+        spdlog::error("Failed to set frequency to {} Hz: {}",
+                      alloc_params_.center_freq,
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
         return false;
     }
-    result = hackrf_set_vga_gain(__dev__, __alloc_params__.vga_gain);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set VGA gain: {}",
-                      hackrf_error_name((hackrf_error)result));
+    
+    if (!validateGains(static_cast<int>(alloc_params_.vga_gain), 
+                       static_cast<int>(alloc_params_.lna_gain))) {
+        spdlog::error("Invalid gain values: VGA={}, LNA={}", 
+                      alloc_params_.vga_gain, alloc_params_.lna_gain);
         return false;
     }
-    result = hackrf_set_lna_gain(__dev__, __alloc_params__.lna_gain);
+    
+    result = hackrf_set_vga_gain(device_, alloc_params_.vga_gain);
     if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set LNA gain: {}",
-                      hackrf_error_name((hackrf_error)result));
+        spdlog::error("Failed to set VGA gain to {}: {}",
+                      alloc_params_.vga_gain,
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
         return false;
     }
-    result = hackrf_set_sample_rate(__dev__, __alloc_params__.sample_rate);
+    
+    result = hackrf_set_lna_gain(device_, alloc_params_.lna_gain);
     if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set sample rate: {}",
-                      hackrf_error_name((hackrf_error)result));
+        spdlog::error("Failed to set LNA gain to {}: {}",
+                      alloc_params_.lna_gain,
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
         return false;
     }
-    uint32_t bw_hz = hackrf_compute_baseband_filter_bw(__alloc_params__.bandwidth);
-    result = hackrf_set_baseband_filter_bandwidth(__dev__, bw_hz);
+    
+    result = hackrf_set_sample_rate(device_, alloc_params_.sample_rate);
     if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to set bandwidth: {}",
-                      hackrf_error_name((hackrf_error)result));
+        spdlog::error("Failed to set sample rate to {} Hz: {}",
+                      alloc_params_.sample_rate,
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
         return false;
     }
+    
+    uint32_t bw_hz = hackrf_compute_baseband_filter_bw(alloc_params_.bandwidth);
+    result = hackrf_set_baseband_filter_bandwidth(device_, bw_hz);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set bandwidth to {} Hz: {}",
+                      alloc_params_.bandwidth,
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
+        return false;
+    }
+    
     spdlog::info("{}############ Device configured ############{}",
                  colors::GREEN, colors::RESET);
-    spdlog::info("Center frequency: {} Hz", __alloc_params__.center_freq);
-    spdlog::info("Sample rate: {} Hz", __alloc_params__.sample_rate);
-    spdlog::info("Bandwidth: {} Hz", __alloc_params__.bandwidth);
-    spdlog::info("VGA gain: {}", __alloc_params__.vga_gain);
-    spdlog::info("LNA gain: {}", __alloc_params__.lna_gain);
+    spdlog::info("Center frequency: {} Hz", alloc_params_.center_freq);
+    spdlog::info("Sample rate: {} Hz", alloc_params_.sample_rate);
+    spdlog::info("Bandwidth: {} Hz", alloc_params_.bandwidth);
+    spdlog::info("VGA gain: {}", alloc_params_.vga_gain);
+    spdlog::info("LNA gain: {}", alloc_params_.lna_gain);
     spdlog::info("{}###########################################{}",
                  colors::GREEN, colors::RESET);
     return true;
 }
 
-std::vector<bool> HackrfDevice::_validate_gains(int vga_gain, int lna_gain) {
-    std::vector<bool> isvalid = {true, true};
+bool HackrfDevice::validateGains(int vga_gain, int lna_gain) const {
+    // VGA gain: 0-62, step 2
     if (vga_gain < 0 || vga_gain > 62 || vga_gain % 2 != 0) {
-        isvalid[0] = false;
+        return false;
     }
-    if (lna_gain < 0 || lna_gain > 40 || lna_gain % 2 != 0) {
-        isvalid[1] = false;
+    // LNA gain: 0-40, step 8
+    if (lna_gain < 0 || lna_gain > 40 || lna_gain % 8 != 0) {
+        return false;
     }
-    return isvalid;
+    return true;
 }
 
-int HackrfDevice::_rx_callback(hackrf_transfer *transfer) {
-    HackrfDevice *instance = reinterpret_cast<HackrfDevice *>(transfer->rx_ctx);
-    return instance->_handle_rx(transfer);
+int HackrfDevice::rxCallback(hackrf_transfer* transfer) {
+    HackrfDevice* instance = static_cast<HackrfDevice*>(transfer->rx_ctx);
+    return instance->handleRx(transfer);
 }
 
-int HackrfDevice::_handle_rx(hackrf_transfer *transfer) {
-    std::lock_guard<std::mutex> lock(__samples_mutex__);
-    const int8_t *raw_data = reinterpret_cast<const int8_t *>(transfer->buffer);
-    __samples_buffer__.insert(__samples_buffer__.end(), raw_data,
-                              raw_data + transfer->valid_length);
+int HackrfDevice::handleRx(hackrf_transfer* transfer) {
+    std::lock_guard<std::mutex> lock(samples_mutex_);
+    const int8_t* raw_data = reinterpret_cast<const int8_t*>(transfer->buffer);
+    samples_buffer_.insert(samples_buffer_.end(), raw_data,
+                           raw_data + transfer->valid_length);
     return 0;
 }
 
 bool HackrfDevice::startRx() {
-    if (__running__.load()) {
+    if (running_.load()) {
         spdlog::warn("RX already running");
         return false;
     }
-    int result = hackrf_start_rx(__dev__, _rx_callback, this);
-    if (result != HACKRF_SUCCESS) {
-        spdlog::error("Failed to start RX: {}",
-                      hackrf_error_name((hackrf_error)result));
+    
+    if (!device_) {
+        spdlog::error("Cannot start RX: device is null");
         return false;
     }
-    __running__.store(true);
+    
+    int result = hackrf_start_rx(device_, rxCallback, this);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to start RX: {}",
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
+        return false;
+    }
+    running_.store(true);
     spdlog::info("RX started");
     return true;
 }
 
-void HackrfDevice::stopRx() {
-    if (!__running__.load()) {
+bool HackrfDevice::stopRx() {
+    if (!running_.load()) {
         spdlog::warn("RX already stopped");
-        return;
+        return true;  // Not an error, just already stopped
     }
-    hackrf_stop_rx(__dev__);
-    __running__.store(false);
+    
+    if (!device_) {
+        spdlog::error("Cannot stop RX: device is null");
+        return false;
+    }
+    
+    int result = hackrf_stop_rx(device_);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to stop RX: {}",
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
+        running_.store(false);  // Mark as stopped anyway
+        return false;
+    }
+    
+    running_.store(false);
     spdlog::info("RX stopped");
+    return true;
 }
 
-std::vector<std::complex<float>> HackrfDevice::getIQSamplesForProcessing() {
-    std::lock_guard<std::mutex> lock(__samples_mutex__);
-    std::vector<std::complex<float>> iq_samples =
-        convertRawSamples(__samples_buffer__);
-    __samples_buffer__.clear();
-    removeDCOffset(iq_samples);
+std::vector<std::complex<float>> HackrfDevice::getIQSamplesForProcessing(
+    bool remove_dc) {
+    std::vector<int8_t> local_buffer;
+    {
+        std::lock_guard<std::mutex> lock(samples_mutex_);
+        local_buffer = std::move(samples_buffer_);
+        samples_buffer_.clear();
+    }
+    
+    std::vector<std::complex<float>> iq_samples = convertRawSamples(local_buffer);
+    
+    if (remove_dc && !iq_samples.empty()) {
+        removeDCOffset(iq_samples);
+    }
     return iq_samples;
 }
 
@@ -200,60 +461,79 @@ std::vector<double> HackrfDevice::getMagnitudeSpectrum() {
 }
 
 std::vector<double> HackrfDevice::getMagnitudeSpectrumFromIQ(
-    const std::vector<std::complex<float>> &iq_samples) {
-    if (iq_samples.empty()) {
-        return std::vector<double>(__alloc_params__.fft_size, -200.0);
+    const std::vector<std::complex<float>>& iq_samples) {
+    const int fft_size = alloc_params_.fft_size;
+    
+    if (fft_size <= 0) {
+        return {};
     }
-    std::vector<double> magnitudes =
-        calculateMagnitudeSpectrum(iq_samples, __alloc_params__.fft_size);
+    
+    if (iq_samples.empty()) {
+        return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
+    }
+    
+    std::vector<double> magnitudes = calculateMagnitudeSpectrum(iq_samples, fft_size);
+    
+    if (magnitudes.empty()) {
+        return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
+    }
 
-    std::vector<double> spectrum_db(__alloc_params__.fft_size);
-    for (int i = 0; i < __alloc_params__.fft_size; ++i) {
-        double magnitude = magnitudes[i];
-        spectrum_db[i] = 20.0 * std::log10(magnitude + 1e-10);
+    const double fft_norm = static_cast<double>(std::max(1, fft_size));
+    const double hann_coherent_gain = 0.5;
+    const double full_scale = fft_norm * hann_coherent_gain;
+    
+    std::vector<double> spectrum_db(static_cast<size_t>(fft_size));
+    for (int i = 0; i < fft_size; ++i) {
+        double magnitude = magnitudes[static_cast<size_t>(i)] / full_scale;
+        spectrum_db[static_cast<size_t>(i)] = 20.0 * std::log10(magnitude + 1e-12);
     }
     return spectrum_db;
 }
 
 std::vector<std::complex<float>>
-HackrfDevice::convertRawSamples(const std::vector<int8_t> &raw_samples) {
+HackrfDevice::convertRawSamples(const std::vector<int8_t>& raw_samples) const {
     std::vector<std::complex<float>> iq_samples;
+    
     if (raw_samples.size() % 2 != 0) {
-        spdlog::warn("Raw samples size is odd, dropping last sample.");
+        spdlog::warn("Raw samples size is odd ({}), dropping last byte", raw_samples.size());
     }
-    size_t num_samples = raw_samples.size() / 2;
+    
+    const size_t num_samples = raw_samples.size() / 2;
     iq_samples.reserve(num_samples);
 
     for (size_t i = 0; i < num_samples; ++i) {
-        float i_val = static_cast<float>(raw_samples[2 * i]) /
-                      128.0f;
-        float q_val = static_cast<float>(raw_samples[2 * i + 1]) /
-                      128.0f;
+        // Normalize to [-1, 1] range (approximately)
+        float i_val = static_cast<float>(raw_samples[2 * i]) / 128.0f;
+        float q_val = static_cast<float>(raw_samples[2 * i + 1]) / 128.0f;
         iq_samples.emplace_back(i_val, q_val);
     }
     return iq_samples;
 }
 
 std::vector<double> HackrfDevice::calculateMagnitudeSpectrum(
-    const std::vector<std::complex<float>> &iq_samples, int fft_size) {
+    const std::vector<std::complex<float>>& iq_samples, int fft_size) const {
     return performFFTAndGetMagnitude(iq_samples, fft_size);
 }
 
-void HackrfDevice::removeDCOffset(std::vector<std::complex<float>> &iq_samples) {
+void HackrfDevice::removeDCOffset(std::vector<std::complex<float>>& iq_samples) {
     if (iq_samples.empty()) {
         return;
     }
-    std::lock_guard<std::mutex> lock(__dc_mutex__);
+    
+    std::lock_guard<std::mutex> lock(dc_mutex_);
+    
+    // Single-pole IIR highpass filter for DC removal
     const float dc_alpha = 0.995f;
     const float dc_one_minus_alpha = 1.0f - dc_alpha;
-    for (auto &s : iq_samples) {
+    
+    for (auto& s : iq_samples) {
         float i_val = s.real();
         float q_val = s.imag();
-        __dc_i_accumulator__ =
-            dc_alpha * __dc_i_accumulator__ + dc_one_minus_alpha * i_val;
-        __dc_q_accumulator__ =
-            dc_alpha * __dc_q_accumulator__ + dc_one_minus_alpha * q_val;
-        s = std::complex<float>(i_val - __dc_i_accumulator__,
-                                q_val - __dc_q_accumulator__);
+        
+        dc_i_accumulator_ = dc_alpha * dc_i_accumulator_ + dc_one_minus_alpha * i_val;
+        dc_q_accumulator_ = dc_alpha * dc_q_accumulator_ + dc_one_minus_alpha * q_val;
+        
+        s = std::complex<float>(i_val - dc_i_accumulator_,
+                                q_val - dc_q_accumulator_);
     }
 }

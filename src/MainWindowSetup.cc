@@ -44,7 +44,7 @@ void MainWindow::setupPlot() {
         plot->graph(0)->setPen(QPen(Qt::blue));
         plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
         plot->xAxis->setLabel("Frequency (MHz)");
-        plot->yAxis->setLabel("Amplitude (dB)");
+        plot->yAxis->setLabel("Amplitude (dBFS)");
 
         QVector<double> x(fftSize), y(fftSize), y2(fftSize);
         for (int i = 0; i < fftSize; ++i) {
@@ -64,6 +64,7 @@ void MainWindow::setupPlot() {
         waterfallMap->setColorScale(waterfallColorScale);
         waterfallMap->setInterpolate(false);
         waterfallMap->setGradient(QCPColorGradient::gpThermal);
+        waterfallColorScale->setDataRange(QCPRange(-100.0, 50.0));  // фиксированная шкала dB (как у спектра)
 
         QCPColorMapData *data = waterfallMap->data();
         data->setSize(fftSize, waterfallHistorySize);
@@ -167,6 +168,9 @@ void MainWindow::setupControls() {
 
 void MainWindow::setupInfo() {
     averagePowerLabel = new QLabel(QString::number(average_power));
+    rbwLabel = new QLabel("--");
+    detectionToleranceLabel = new QLabel("--");
+    updateDspMetricsInfo();
 }
 
 void MainWindow::setupMenuBar() {
