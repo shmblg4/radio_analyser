@@ -45,6 +45,9 @@ private:
     struct DSPState {
         float dc_accumulator = 0.0f;
         float deemphasis_state = 0.0f;
+        float voice_lp_state = 0.0f;
+        float voice_hp_prev_input = 0.0f;
+        float voice_hp_prev_output = 0.0f;
         std::complex<float> channel_lp_state{0.0f, 0.0f};
         double nco_phase = 0.0;
         double residual_freq_estimate_hz = 0.0;
@@ -52,6 +55,9 @@ private:
         void reset() {
             dc_accumulator = 0.0f;
             deemphasis_state = 0.0f;
+            voice_lp_state = 0.0f;
+            voice_hp_prev_input = 0.0f;
+            voice_hp_prev_output = 0.0f;
             channel_lp_state = std::complex<float>(0.0f, 0.0f);
             nco_phase = 0.0;
             residual_freq_estimate_hz = 0.0;

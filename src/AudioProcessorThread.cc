@@ -92,9 +92,9 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         return {};
     }
 
+    constexpr double kTargetDemodRateHz = 96000.0;
     const int channel_decim =
-        std::max(1, static_cast<int>(std::floor(sample_rate /
-                                                static_cast<double>(audio_rate * 8))));
+        std::max(1, static_cast<int>(std::floor(sample_rate / kTargetDemodRateHz)));
     const double channel_sample_rate = sample_rate / channel_decim;
     const float limiter_threshold = 0.005f;
 
@@ -120,10 +120,8 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     const double nco_step =
         (-2.0 * M_PI * local_state.residual_freq_estimate_hz) / sample_rate;
     
-    // Corrected IIR lowpass filter coefficient
-    // For single-pole IIR: alpha = 1 - exp(-2*pi*fc/fs)
-    // y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
-    const double channel_cutoff_hz = 12500.0;
+
+    const double channel_cutoff_hz = std::min(10000.0, 0.45 * channel_sample_rate);
     const double lp_alpha = 1.0 - std::exp(-2.0 * M_PI * channel_cutoff_hz / sample_rate);
     const float lp_alpha_f = static_cast<float>(lp_alpha);
     const float lp_one_minus_alpha = 1.0f - lp_alpha_f;
@@ -156,9 +154,7 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     std::vector<float> demod;
     demod.reserve(channelized.size());
     
-    // FM demodulation: normalize by FM deviation to get audio amplitude
-    // Instantaneous frequency = (dφ/dt) / (2π) = Δφ * fs / (2π)
-    // Normalized audio = instantaneous_freq / fm_deviation
+
     const float phase_scale = static_cast<float>(channel_sample_rate / (2.0 * M_PI * fm_deviation_hz));
     
     std::complex<float> prev = channelized[0];
@@ -197,7 +193,6 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         }
     }
 
-    // De-emphasis filter for FM (75µs in US, 50µs in Europe; using 75µs)
     const double deemphasis_tau_sec = 75e-6;
     const float deemph_alpha =
         static_cast<float>(std::exp(-1.0 / (channel_sample_rate * deemphasis_tau_sec)));
@@ -208,25 +203,34 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         v = local_state.deemphasis_state;
     }
 
-    // Save DSP state back with lock
-    {
-        std::lock_guard<std::mutex> lock(dsp_state_mutex_);
-        dsp_state_ = local_state;
-    }
-
-    // Butterworth-style IIR lowpass filter for voice band (better than moving average)
-    const double voice_cutoff_hz = 3800.0;
-    const double voice_alpha = 1.0 - std::exp(-2.0 * M_PI * voice_cutoff_hz / channel_sample_rate);
-    const float voice_alpha_f = static_cast<float>(voice_alpha);
-    const float voice_one_minus_alpha = 1.0f - voice_alpha_f;
+    // Voice bandpass to suppress HF whistle and sub-audio signalling tones.
+    const double voice_low_cut_hz = 250.0;
+    const double voice_high_cut_hz = 3400.0;
+    const float hp_alpha = static_cast<float>(
+        std::exp(-2.0 * M_PI * voice_low_cut_hz / channel_sample_rate));
+    const float voice_lp_alpha = static_cast<float>(
+        1.0 - std::exp(-2.0 * M_PI * voice_high_cut_hz / channel_sample_rate));
+    const float voice_lp_one_minus_alpha = 1.0f - voice_lp_alpha;
     
     std::vector<float> filtered_demod;
     filtered_demod.reserve(demod.size());
     
-    float voice_filter_state = demod[0];
     for (size_t i = 0; i < demod.size(); ++i) {
-        voice_filter_state = voice_alpha_f * demod[i] + voice_one_minus_alpha * voice_filter_state;
-        filtered_demod.push_back(voice_filter_state);
+        const float hp_out = hp_alpha * (local_state.voice_hp_prev_output + demod[i] -
+                                         local_state.voice_hp_prev_input);
+        local_state.voice_hp_prev_input = demod[i];
+        local_state.voice_hp_prev_output = hp_out;
+
+        local_state.voice_lp_state =
+            voice_lp_alpha * hp_out +
+            voice_lp_one_minus_alpha * local_state.voice_lp_state;
+        filtered_demod.push_back(local_state.voice_lp_state);
+    }
+
+    // Save DSP state back with lock after all filters update.
+    {
+        std::lock_guard<std::mutex> lock(dsp_state_mutex_);
+        dsp_state_ = local_state;
     }
 
     std::vector<float> resampled;

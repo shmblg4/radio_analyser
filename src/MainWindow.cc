@@ -532,21 +532,36 @@ void MainWindow::scanActive() {
         p = q;
     }
 
-    // Обновляем список задетектированных: слияние с уже известными или добавление
+    std::vector<double> updated_frequencies;
+    updated_frequencies.reserve(new_peaks_mhz.size());
     for (double detected_freq_mhz : new_peaks_mhz) {
         double existing_freq = 0.0;
         if (isNearExistingFrequency(detected_freq_mhz, existing_freq)) {
-            auto it = std::find(detectedFrequencies.begin(), detectedFrequencies.end(), existing_freq);
-            if (it != detectedFrequencies.end()) {
-                *it = (existing_freq + detected_freq_mhz) / 2.0;
-            }
+            constexpr double kHistoryBlend = 0.8;
+            updated_frequencies.push_back(
+                kHistoryBlend * existing_freq + (1.0 - kHistoryBlend) * detected_freq_mhz);
         } else {
-            detectedFrequencies.push_back(detected_freq_mhz);
-            if (detectedFrequencies.size() > MAX_DETECTED_FREQUENCIES) {
-                detectedFrequencies.erase(detectedFrequencies.begin());
-            }
+            updated_frequencies.push_back(detected_freq_mhz);
         }
     }
+
+    std::sort(updated_frequencies.begin(), updated_frequencies.end());
+    std::vector<double> deduped_frequencies;
+    deduped_frequencies.reserve(updated_frequencies.size());
+    for (double freq_mhz : updated_frequencies) {
+        if (deduped_frequencies.empty() ||
+            std::abs(freq_mhz - deduped_frequencies.back()) > merge_mhz) {
+            deduped_frequencies.push_back(freq_mhz);
+        } else {
+            deduped_frequencies.back() =
+                0.5 * (deduped_frequencies.back() + freq_mhz);
+        }
+    }
+
+    if (deduped_frequencies.size() > MAX_DETECTED_FREQUENCIES) {
+        deduped_frequencies.resize(MAX_DETECTED_FREQUENCIES);
+    }
+    detectedFrequencies = std::move(deduped_frequencies);
 
     updateDetectedFrequenciesList();
 }

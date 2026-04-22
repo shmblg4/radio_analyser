@@ -109,7 +109,7 @@ private:
     std::vector<double> detectedFrequencies;
     static constexpr double MIN_FREQUENCY_TOLERANCE_MHZ = 0.010;
     static constexpr double DETECTOR_CHANNEL_WIDTH_HZ = 25000.0;
-    static constexpr double MERGE_WIDTH_CHANNEL_FACTOR = 0.5;
+    static constexpr double MERGE_WIDTH_CHANNEL_FACTOR = 1.0;
     static constexpr size_t MAX_DETECTED_FREQUENCIES = 10;
 
     QGroupBox *controls;
