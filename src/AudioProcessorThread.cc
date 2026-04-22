@@ -108,43 +108,37 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         local_state = dsp_state_;
     }
 
-    const double estimated_carrier_hz =
-        estimateResidualCarrierHz(iq_samples, sample_rate);
-    local_state.residual_freq_estimate_hz =
-        0.9 * local_state.residual_freq_estimate_hz + 0.1 * estimated_carrier_hz;
+    // Wideband FM on IQ makes estimateResidualCarrierHz() follow modulation, not
+    // LO offset — logs showed kHz-class "residual" during TX and audible whistle.
+    local_state.residual_freq_estimate_hz = 0.0;
 
     std::vector<std::complex<float>> channelized;
     channelized.reserve(iq_samples.size() /
                         static_cast<size_t>(channel_decim) + 1U);
 
-    const double nco_step =
-        (-2.0 * M_PI * local_state.residual_freq_estimate_hz) / sample_rate;
-    
-
     const double channel_cutoff_hz = std::min(10000.0, 0.45 * channel_sample_rate);
     const double lp_alpha = 1.0 - std::exp(-2.0 * M_PI * channel_cutoff_hz / sample_rate);
     const float lp_alpha_f = static_cast<float>(lp_alpha);
     const float lp_one_minus_alpha = 1.0f - lp_alpha_f;
+    std::complex<float> decim_acc(0.0f, 0.0f);
+    int decim_count = 0;
 
     for (size_t i = 0; i < iq_samples.size(); ++i) {
-        const std::complex<float> rot(
-            static_cast<float>(std::cos(local_state.nco_phase)), 
-            static_cast<float>(std::sin(local_state.nco_phase)));
-        std::complex<float> shifted = iq_samples[i] * rot;
-        local_state.nco_phase += nco_step;
-        if (local_state.nco_phase > M_PI) {
-            local_state.nco_phase -= 2.0 * M_PI;
-        } else if (local_state.nco_phase < -M_PI) {
-            local_state.nco_phase += 2.0 * M_PI;
-        }
+        const std::complex<float> shifted = iq_samples[i];
 
-        // IIR lowpass: y[n] = alpha * x[n] + (1-alpha) * y[n-1]
         local_state.channel_lp_state = lp_alpha_f * shifted +
                             lp_one_minus_alpha * local_state.channel_lp_state;
 
-        if (i % static_cast<size_t>(channel_decim) == 0U) {
-            channelized.push_back(local_state.channel_lp_state);
+        decim_acc += local_state.channel_lp_state;
+        ++decim_count;
+        if (decim_count >= channel_decim) {
+            channelized.push_back(decim_acc / static_cast<float>(channel_decim));
+            decim_acc = std::complex<float>(0.0f, 0.0f);
+            decim_count = 0;
         }
+    }
+    if (decim_count > 0) {
+        channelized.push_back(decim_acc / static_cast<float>(decim_count));
     }
 
     if (channelized.size() < 2) {
@@ -203,9 +197,10 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         v = local_state.deemphasis_state;
     }
 
-    // Voice bandpass to suppress HF whistle and sub-audio signalling tones.
-    const double voice_low_cut_hz = 250.0;
-    const double voice_high_cut_hz = 3400.0;
+    // Two cascaded 1st-order HPFs (~380 Hz) attenuate CTCSS/DCS sub-audio (67–254 Hz)
+    // much more than a single soft HPF at 300 Hz (H8).
+    const double voice_low_cut_hz = 380.0;
+    const double voice_high_cut_hz = 3000.0;
     const float hp_alpha = static_cast<float>(
         std::exp(-2.0 * M_PI * voice_low_cut_hz / channel_sample_rate));
     const float voice_lp_alpha = static_cast<float>(
@@ -216,13 +211,18 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     filtered_demod.reserve(demod.size());
     
     for (size_t i = 0; i < demod.size(); ++i) {
-        const float hp_out = hp_alpha * (local_state.voice_hp_prev_output + demod[i] -
-                                         local_state.voice_hp_prev_input);
+        const float hp1 = hp_alpha * (local_state.voice_hp_prev_output + demod[i] -
+                                      local_state.voice_hp_prev_input);
         local_state.voice_hp_prev_input = demod[i];
-        local_state.voice_hp_prev_output = hp_out;
+        local_state.voice_hp_prev_output = hp1;
+
+        const float hp2 = hp_alpha * (local_state.voice_hp2_prev_output + hp1 -
+                                       local_state.voice_hp2_prev_input);
+        local_state.voice_hp2_prev_input = hp1;
+        local_state.voice_hp2_prev_output = hp2;
 
         local_state.voice_lp_state =
-            voice_lp_alpha * hp_out +
+            voice_lp_alpha * hp2 +
             voice_lp_one_minus_alpha * local_state.voice_lp_state;
         filtered_demod.push_back(local_state.voice_lp_state);
     }
@@ -289,30 +289,3 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
 
     return audioSamples;
 }
-
-double AudioProcessorThread::estimateResidualCarrierHz(
-    const std::vector<std::complex<float>> &iq_samples, double sample_rate) const {
-    if (iq_samples.size() < 2 || sample_rate <= 0.0) {
-        return 0.0;
-    }
-
-    std::complex<double> acc(0.0, 0.0);
-    constexpr float mag_threshold = 0.005f;
-    for (size_t i = 1; i < iq_samples.size(); ++i) {
-        const std::complex<float> prev = iq_samples[i - 1];
-        const std::complex<float> curr = iq_samples[i];
-        if (std::abs(prev) < mag_threshold || std::abs(curr) < mag_threshold) {
-            continue;
-        }
-        acc += static_cast<std::complex<double>>(curr) *
-               std::conj(static_cast<std::complex<double>>(prev));
-    }
-
-    if (std::abs(acc) < 1e-9) {
-        return 0.0;
-    }
-
-    const double avg_phase = std::atan2(acc.imag(), acc.real());
-    return avg_phase * sample_rate / (2.0 * M_PI);
-}
-

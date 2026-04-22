@@ -31,8 +31,6 @@ protected:
 private:
     std::vector<int16_t> processDemodulation(const std::vector<std::complex<float>> &iq_samples,
                                             double sample_rate, int audio_rate);
-    double estimateResidualCarrierHz(const std::vector<std::complex<float>> &iq_samples,
-                                     double sample_rate) const;
 
     struct ProcessingData {
         std::vector<std::complex<float>> iq_samples;
@@ -48,8 +46,9 @@ private:
         float voice_lp_state = 0.0f;
         float voice_hp_prev_input = 0.0f;
         float voice_hp_prev_output = 0.0f;
+        float voice_hp2_prev_input = 0.0f;
+        float voice_hp2_prev_output = 0.0f;
         std::complex<float> channel_lp_state{0.0f, 0.0f};
-        double nco_phase = 0.0;
         double residual_freq_estimate_hz = 0.0;
         
         void reset() {
@@ -58,8 +57,9 @@ private:
             voice_lp_state = 0.0f;
             voice_hp_prev_input = 0.0f;
             voice_hp_prev_output = 0.0f;
+            voice_hp2_prev_input = 0.0f;
+            voice_hp2_prev_output = 0.0f;
             channel_lp_state = std::complex<float>(0.0f, 0.0f);
-            nco_phase = 0.0;
             residual_freq_estimate_hz = 0.0;
         }
     };

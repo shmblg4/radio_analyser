@@ -485,10 +485,10 @@ void MainWindow::scanActive() {
 
     const double freq_resolution_hz = getRbwHz();
     const double adaptive_channel_width_hz =
-        std::max(DETECTOR_CHANNEL_WIDTH_HZ, 6.0 * freq_resolution_hz);
+        std::max(0.5 * DETECTOR_CHANNEL_WIDTH_HZ, 3.0 * freq_resolution_hz);
     int smooth_half = static_cast<int>(
-        std::round(0.5 * adaptive_channel_width_hz / freq_resolution_hz));
-    smooth_half = std::clamp(smooth_half, 2, total_bins / 4);
+        std::round(0.25 * adaptive_channel_width_hz / freq_resolution_hz));
+    smooth_half = std::clamp(smooth_half, 1, total_bins / 4);
 
     std::vector<double> smoothed(total_bins, 0.0);
     for (int i = 0; i < total_bins; ++i) {
@@ -504,11 +504,17 @@ void MainWindow::scanActive() {
     struct Peak { int bin; double power; };
     std::vector<Peak> raw_peaks;
     for (int i = 1; i < total_bins - 1; ++i) {
-        if (smoothed[i] <= power_threshold) {
+        const double peak_power = std::max(smoothed[i], spectrum_db[static_cast<size_t>(i)]);
+        if (peak_power <= power_threshold) {
             continue;
         }
-        if (smoothed[i] >= smoothed[i - 1] && smoothed[i] >= smoothed[i + 1]) {
-            raw_peaks.push_back({i, smoothed[i]});
+        const bool smooth_local_max =
+            smoothed[i] >= smoothed[i - 1] && smoothed[i] >= smoothed[i + 1];
+        const bool raw_local_max =
+            spectrum_db[static_cast<size_t>(i)] >= spectrum_db[static_cast<size_t>(i - 1)] &&
+            spectrum_db[static_cast<size_t>(i)] >= spectrum_db[static_cast<size_t>(i + 1)];
+        if (smooth_local_max || raw_local_max) {
+            raw_peaks.push_back({i, peak_power});
         }
     }
 
@@ -561,6 +567,7 @@ void MainWindow::scanActive() {
     if (deduped_frequencies.size() > MAX_DETECTED_FREQUENCIES) {
         deduped_frequencies.resize(MAX_DETECTED_FREQUENCIES);
     }
+
     detectedFrequencies = std::move(deduped_frequencies);
 
     updateDetectedFrequenciesList();

@@ -12,7 +12,9 @@ void SpectrumWorker::computeSpectrum() {
     if (!device_) {
         return;
     }
-    auto iq_samples = device_->getIQSamplesForProcessing();
+    // Keep spectrum path consistent with listening path: DC removal near the
+    // tuned center may suppress a real narrowband transmission.
+    auto iq_samples = device_->getIQSamplesForProcessing(false);
     if (iq_samples.empty()) {
         return;
     }
