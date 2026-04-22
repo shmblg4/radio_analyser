@@ -1,16 +1,25 @@
 #include "MainWindow.hpp"
-#include "radio_scanner.hpp"
 #include "AudioProcessorThread.hpp"
+#include "LogSink.hpp"
+#include "SpectrumWorker.hpp"
+#include "radio_scanner.hpp"
+
+#include <QMetaObject>
+#include <QThread>
 
 #ifdef HAVE_QT_AUDIO
 #include <QtMultimedia/QAudioFormat>
 #include <QtMultimedia/QAudioSink>
 #endif
 
+#include <QBrush>
+#include <QColor>
+#include <QMenuBar>
 #include <QMessageBox>
+#include <QPalette>
+#include <QTextCursor>
 #include <spdlog/spdlog.h>
 #include <algorithm>
-#include <limits>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
@@ -19,6 +28,7 @@ MainWindow::MainWindow(QWidget *parent)
       spectrumUpdateTimer(new QTimer(this)),
       averagePowerLevelTimer(new QTimer(this)),
       scanActiveTimer(new QTimer(this)),
+      activeFreqCleanupTimer(new QTimer(this)),
       alloc_params({static_cast<uint64_t>(405.125 * 1e6),
                     static_cast<uint64_t>(4.8 * 1e6),
                     static_cast<uint32_t>(2.0 * 1e6), 0, 0, 1024}),
@@ -30,6 +40,9 @@ MainWindow::MainWindow(QWidget *parent)
       volumeLabel(nullptr),
       listeningStatusLabel(nullptr),
       listeningFrequencyLabel(nullptr),
+      detectedFrequenciesGroup(nullptr),
+      detectedFrequenciesList(nullptr),
+      clearDetectedButton(nullptr),
       plotModeAction(nullptr),
       viewToolBar(nullptr) {
 
@@ -84,8 +97,12 @@ MainWindow::MainWindow(QWidget *parent)
     controls->setFixedWidth(300);
 
     QVBoxLayout *infoLayout = new QVBoxLayout;
-    infoLayout->addWidget(new QLabel(tr("Average Power (dB):")));
+    infoLayout->addWidget(new QLabel(tr("Average Power (dBFS):")));
     infoLayout->addWidget(averagePowerLabel);
+    infoLayout->addWidget(new QLabel(tr("RBW (Hz/bin):")));
+    infoLayout->addWidget(rbwLabel);
+    infoLayout->addWidget(new QLabel(tr("Detection Tolerance (kHz):")));
+    infoLayout->addWidget(detectionToleranceLabel);
     infoLayout->addStretch();
     info->setLayout(infoLayout);
     info->setFixedWidth(300);
@@ -121,11 +138,18 @@ MainWindow::MainWindow(QWidget *parent)
     audioProcessorThread->start();
 #endif
 
+    setupMenuBar();
     setupToolbar();
 
     setCentralWidget(centralWidget);
     setupLayout();
-    
+
+    {
+        auto logSink = std::make_shared<LogSink>(this);
+        spdlog::default_logger()->sinks().clear();
+        spdlog::default_logger()->sinks().push_back(logSink);
+    }
+
 #ifdef HAVE_QT_AUDIO
     if (volumeSlider && audioSink) {
         int volumeValue = volumeSlider->value();
@@ -135,7 +159,10 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
 
     setupPlot();
-    resize(1000, 600);
+    updateDspMetricsInfo();
+    logBaselineMetrics("startup");
+    setMinimumSize(1100, 700);
+    resize(1200, 800);
     try {
         device = std::make_unique<HackrfDevice>();
         if (!device->configure(alloc_params)) {
@@ -153,6 +180,15 @@ MainWindow::MainWindow(QWidget *parent)
         return;
     }
 
+    qRegisterMetaType<std::vector<double>>("std::vector<double>");
+    spectrumWorker_ = new SpectrumWorker(this);
+    spectrumWorker_->setDevice(device.get());
+    spectrumThread_ = new QThread(this);
+    spectrumWorker_->moveToThread(spectrumThread_);
+    connect(spectrumWorker_, &SpectrumWorker::spectrumReady,
+            this, &MainWindow::onSpectrumReady, Qt::QueuedConnection);
+    spectrumThread_->start();
+
     connect(spectrumUpdateTimer, &QTimer::timeout, this,
             &MainWindow::updateSpectrum);
     spectrumUpdateTimer->start(50);
@@ -160,16 +196,20 @@ MainWindow::MainWindow(QWidget *parent)
             &MainWindow::updateAveragePower);
     averagePowerLevelTimer->start(100);
     connect(scanActiveTimer, &QTimer::timeout, this, &MainWindow::scanActive);
-    scanActiveTimer->start(100);
+    scanActiveTimer->start(500);
 }
 
 MainWindow::~MainWindow() {
-    if (device) {
-        device->stopRx();
-    }
     spectrumUpdateTimer->stop();
     averagePowerLevelTimer->stop();
     scanActiveTimer->stop();
+    if (spectrumThread_) {
+        spectrumThread_->quit();
+        spectrumThread_->wait();
+    }
+    if (device) {
+        device->stopRx();
+    }
 #ifdef HAVE_QT_AUDIO
     if (audioProcessorThread) {
         audioProcessorThread->stopProcessing();
@@ -181,9 +221,28 @@ MainWindow::~MainWindow() {
 void MainWindow::updateSpectrum() {
     if (!device)
         return;
+    if (listeningActive)
+        return;
+    if (!spectrumWorker_)
+        return;
 
-    spectrum_db = device->getMagnitudeSpectrum();
+    QMetaObject::invokeMethod(spectrumWorker_, "computeSpectrum", Qt::QueuedConnection);
+}
 
+void MainWindow::onSpectrumReady(std::vector<double> result) {
+    spectrum_db = std::move(result);
+    refreshSpectrumPlot();
+}
+
+void MainWindow::updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq_samples) {
+    if (!device || iq_samples.empty())
+        return;
+
+    spectrum_db = device->getMagnitudeSpectrumFromIQ(iq_samples);
+    refreshSpectrumPlot();
+}
+
+void MainWindow::refreshSpectrumPlot() {
     if (spectrum_db.size() != static_cast<size_t>(fftSize)) {
         return;
     }
@@ -192,7 +251,7 @@ void MainWindow::updateSpectrum() {
     static uint64_t last_center_freq = 0;
     static int last_fft_size = 0;
 
-    double freq_resolution_hz = alloc_params.sample_rate / fftSize;
+    double freq_resolution_hz = getRbwHz();
     double start_freq_hz =
         (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
     double end_freq_hz =
@@ -216,6 +275,7 @@ void MainWindow::updateSpectrum() {
         last_sample_rate = alloc_params.sample_rate;
         last_center_freq = alloc_params.center_freq;
         last_fft_size = fftSize;
+        updateDspMetricsInfo();
     }
 
     if (currentPlotMode == PlotMode::Spectrum) {
@@ -228,7 +288,7 @@ void MainWindow::updateSpectrum() {
         for (int i = 0; i < fftSize; ++i) {
             x[i] = x_axis_values[i];
             y[i] = spectrum_db[i];
-            y2[i] = average_power / 2 + threshold;
+            y2[i] = average_power + threshold; 
         }
 
         plot->graph(0)->setData(x, y);
@@ -236,12 +296,8 @@ void MainWindow::updateSpectrum() {
         plot->replot();
     } else {
         QVector<double> line(fftSize);
-        double minVal = std::numeric_limits<double>::max();
-        double maxVal = std::numeric_limits<double>::lowest();
         for (int i = 0; i < fftSize; ++i) {
             line[i] = spectrum_db[i];
-            minVal = std::min(minVal, line[i]);
-            maxVal = std::max(maxVal, line[i]);
         }
 
         waterfallHistory.push_back(std::move(line));
@@ -261,6 +317,7 @@ void MainWindow::updateSpectrum() {
             data->setValueRange(QCPRange(0, waterfallHistorySize));
 
             const int rows = static_cast<int>(waterfallHistory.size());
+            constexpr double emptyCellDb = -200.0;  // значение для пустых ячеек (ниже фиксированной шкалы)
             for (int j = 0; j < waterfallHistorySize; ++j) {
                 int srcIndex = rows - 1 - j;
                 const QVector<double> *rowPtr =
@@ -269,19 +326,11 @@ void MainWindow::updateSpectrum() {
                         : nullptr;
                 for (int i = 0; i < fftSize; ++i) {
                     const bool hasRow = rowPtr && i < rowPtr->size();
-                    const double v = hasRow
-                                         ? (*rowPtr)[i]
-                                         : (minVal == std::numeric_limits<
-                                                             double>::max()
-                                                ? -200.0
-                                                : minVal);
+                    const double v = hasRow ? (*rowPtr)[i] : emptyCellDb;
                     data->setCell(i, j, v);
                 }
             }
 
-            if (waterfallColorScale) {
-                waterfallColorScale->setDataRange(QCPRange(minVal, maxVal));
-            }
             plot->replot();
         }
     }
@@ -305,13 +354,20 @@ void MainWindow::applyConfig() {
     alloc_params.fft_size = fftSize;
     fftSizeLabel->setText(QString::number(fftSize));
     windowed_samples.clear();
-    windowed_samples.resize(WINDOW_SIZE_BY_FFTSIZE[fftSize]);
+    const double freq_res_hz = getRbwHz();
+    const int bins_per_channel = std::max(
+        1, static_cast<int>(std::round(DETECTOR_CHANNEL_WIDTH_HZ / freq_res_hz)));
+    windowed_samples.resize(bins_per_channel);
     waterfallHistory.clear();
     device->stopRx();
     bool success = device->configure(alloc_params);
 
     if (success) {
+        detectedFrequencies.clear();
+        updateDetectedFrequenciesList();
         setupPlot();
+        updateDspMetricsInfo();
+        logBaselineMetrics("applyConfig");
         device->startRx();
         spdlog::info("Configuration applied successfully.");
         QMessageBox::information(this, "Success",
@@ -327,13 +383,15 @@ void MainWindow::updateAveragePower() {
     if (!device || spectrum_db.empty())
         return;
 
-    double sum = 0.0;
+    double linear_sum = 0.0;
     for (int i = 0; i < static_cast<int>(spectrum_db.size()); ++i) {
-        sum += spectrum_db[i];
+        linear_sum += std::pow(10.0, spectrum_db[i] / 10.0);
     }
-    average_power = sum / spectrum_db.size();
+    const double linear_avg = linear_sum / spectrum_db.size();
+    average_power = 10.0 * std::log10(linear_avg + 1e-20);
 
     averagePowerLabel->setText(QString::number(average_power, 'f', 2));
+    updateDspMetricsInfo();
 }
 
 void MainWindow::toggleDisplayMode() {
@@ -347,49 +405,230 @@ void MainWindow::toggleDisplayMode() {
     setupPlot();
 }
 
+void MainWindow::applyTheme(bool dark) {
+    darkTheme_ = dark;
+    if (dark) {
+        QPalette p;
+        p.setColor(QPalette::Window, QColor(53, 53, 53));
+        p.setColor(QPalette::WindowText, Qt::white);
+        p.setColor(QPalette::Base, QColor(42, 42, 42));
+        p.setColor(QPalette::Text, Qt::white);
+        p.setColor(QPalette::Button, QColor(53, 53, 53));
+        p.setColor(QPalette::ButtonText, Qt::white);
+        p.setColor(QPalette::Highlight, QColor(42, 130, 218));
+        p.setColor(QPalette::HighlightedText, Qt::white);
+        p.setColor(QPalette::PlaceholderText, QColor(127, 127, 127));
+        p.setColor(QPalette::AlternateBase, QColor(45, 45, 45));
+        p.setColor(QPalette::ToolTipBase, QColor(53, 53, 53));
+        p.setColor(QPalette::ToolTipText, Qt::white);
+        p.setColor(QPalette::Link, QColor(42, 130, 218));
+        QApplication::setPalette(p);
+        if (darkThemeAction) darkThemeAction->setChecked(true);
+        if (lightThemeAction) lightThemeAction->setChecked(false);
+    } else {
+        QApplication::setPalette(QPalette());
+        if (darkThemeAction) darkThemeAction->setChecked(false);
+        if (lightThemeAction) lightThemeAction->setChecked(true);
+    }
+    updatePlotTheme(dark);
+}
+
+void MainWindow::setDarkTheme() {
+    applyTheme(true);
+}
+
+void MainWindow::setLightTheme() {
+    applyTheme(false);
+}
+
+void MainWindow::updatePlotTheme(bool dark) {
+    if (!plot) return;
+    if (dark) {
+        plot->setBackground(QBrush(QColor(53, 53, 53)));
+        plot->xAxis->setBasePen(QPen(Qt::white));
+        plot->xAxis->setTickPen(QPen(Qt::white));
+        plot->xAxis->setSubTickPen(QPen(Qt::white));
+        plot->xAxis->setTickLabelColor(Qt::white);
+        plot->xAxis->setLabelColor(Qt::white);
+        plot->yAxis->setBasePen(QPen(Qt::white));
+        plot->yAxis->setTickPen(QPen(Qt::white));
+        plot->yAxis->setSubTickPen(QPen(Qt::white));
+        plot->yAxis->setTickLabelColor(Qt::white);
+        plot->yAxis->setLabelColor(Qt::white);
+        if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(QColor(100, 180, 255)));
+        if (plot->graphCount() >= 2) plot->graph(1)->setPen(QPen(QColor(255, 100, 100), 3, Qt::DashLine));
+    } else {
+        plot->setBackground(QBrush(Qt::white));
+        plot->xAxis->setBasePen(QPen(Qt::black));
+        plot->xAxis->setTickPen(QPen(Qt::black));
+        plot->xAxis->setSubTickPen(QPen(Qt::black));
+        plot->xAxis->setTickLabelColor(Qt::black);
+        plot->xAxis->setLabelColor(Qt::black);
+        plot->yAxis->setBasePen(QPen(Qt::black));
+        plot->yAxis->setTickPen(QPen(Qt::black));
+        plot->yAxis->setSubTickPen(QPen(Qt::black));
+        plot->yAxis->setTickLabelColor(Qt::black);
+        plot->yAxis->setLabelColor(Qt::black);
+        if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(Qt::blue));
+        if (plot->graphCount() >= 2) plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
+    }
+    plot->replot();
+}
 
 void MainWindow::scanActive() {
-    if (!device || spectrum_db.empty()) {
+    if (!device || spectrum_db.empty() || x_axis_values.size() != spectrum_db.size()) {
         return;
     }
 
-    int total_bins = static_cast<int>(spectrum_db.size());
-    int scan_window_size_bins = WINDOW_SIZE_BY_FFTSIZE[fftSize];
+    const int total_bins = static_cast<int>(spectrum_db.size());
+    const double power_threshold = average_power + threshold;
 
-    if (scan_window_size_bins > total_bins) {
-        spdlog::warn("Scan window size ({}) is larger than total bins ({}). "
-                     "Skipping scan.",
-                     scan_window_size_bins, total_bins);
-        scan_current_start_index = 0;
+    const double freq_resolution_hz = getRbwHz();
+    const double adaptive_channel_width_hz =
+        std::max(DETECTOR_CHANNEL_WIDTH_HZ, 6.0 * freq_resolution_hz);
+    int smooth_half = static_cast<int>(
+        std::round(0.5 * adaptive_channel_width_hz / freq_resolution_hz));
+    smooth_half = std::clamp(smooth_half, 2, total_bins / 4);
+
+    std::vector<double> smoothed(total_bins, 0.0);
+    for (int i = 0; i < total_bins; ++i) {
+        int lo = std::max(0, i - smooth_half);
+        int hi = std::min(total_bins, i + smooth_half + 1);
+        double sum = 0.0;
+        for (int j = lo; j < hi; ++j) {
+            sum += spectrum_db[j];
+        }
+        smoothed[i] = sum / (hi - lo);
+    }
+
+    struct Peak { int bin; double power; };
+    std::vector<Peak> raw_peaks;
+    for (int i = 1; i < total_bins - 1; ++i) {
+        if (smoothed[i] <= power_threshold) {
+            continue;
+        }
+        if (smoothed[i] >= smoothed[i - 1] && smoothed[i] >= smoothed[i + 1]) {
+            raw_peaks.push_back({i, smoothed[i]});
+        }
+    }
+
+    const double merge_mhz = getDetectionToleranceMHz();
+    std::vector<double> new_peaks_mhz;
+    for (size_t p = 0; p < raw_peaks.size(); ) {
+        int best_bin = raw_peaks[p].bin;
+        double best_power = raw_peaks[p].power;
+        double freq_mhz = x_axis_values[best_bin];
+        size_t q = p + 1;
+        while (q < raw_peaks.size() &&
+               std::abs(x_axis_values[raw_peaks[q].bin] - freq_mhz) <= merge_mhz) {
+            if (raw_peaks[q].power > best_power) {
+                best_power = raw_peaks[q].power;
+                best_bin = raw_peaks[q].bin;
+                freq_mhz = x_axis_values[best_bin];
+            }
+            ++q;
+        }
+        new_peaks_mhz.push_back(estimateSubBinFrequencyMHz(best_bin));
+        p = q;
+    }
+
+    std::vector<double> updated_frequencies;
+    updated_frequencies.reserve(new_peaks_mhz.size());
+    for (double detected_freq_mhz : new_peaks_mhz) {
+        double existing_freq = 0.0;
+        if (isNearExistingFrequency(detected_freq_mhz, existing_freq)) {
+            constexpr double kHistoryBlend = 0.8;
+            updated_frequencies.push_back(
+                kHistoryBlend * existing_freq + (1.0 - kHistoryBlend) * detected_freq_mhz);
+        } else {
+            updated_frequencies.push_back(detected_freq_mhz);
+        }
+    }
+
+    std::sort(updated_frequencies.begin(), updated_frequencies.end());
+    std::vector<double> deduped_frequencies;
+    deduped_frequencies.reserve(updated_frequencies.size());
+    for (double freq_mhz : updated_frequencies) {
+        if (deduped_frequencies.empty() ||
+            std::abs(freq_mhz - deduped_frequencies.back()) > merge_mhz) {
+            deduped_frequencies.push_back(freq_mhz);
+        } else {
+            deduped_frequencies.back() =
+                0.5 * (deduped_frequencies.back() + freq_mhz);
+        }
+    }
+
+    if (deduped_frequencies.size() > MAX_DETECTED_FREQUENCIES) {
+        deduped_frequencies.resize(MAX_DETECTED_FREQUENCIES);
+    }
+    detectedFrequencies = std::move(deduped_frequencies);
+
+    updateDetectedFrequenciesList();
+}
+
+bool MainWindow::isNearExistingFrequency(double newFreq, double& existingFreq) {
+    const double tolerance_mhz = getDetectionToleranceMHz();
+    for (auto& freq : detectedFrequencies) {
+        if (std::abs(newFreq - freq) <= tolerance_mhz) {
+            existingFreq = freq;
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::updateDetectedFrequenciesList() {
+    if (!detectedFrequenciesList) {
         return;
     }
-
-    while (scan_current_start_index + scan_window_size_bins <= total_bins) {
-        int start_idx = scan_current_start_index;
-        int end_idx = start_idx + scan_window_size_bins;
-
-        double sum_in_window = 0.0;
-        for (int i = start_idx; i < end_idx; ++i) {
-            sum_in_window += spectrum_db[i];
-        }
-        double average_in_window = sum_in_window / scan_window_size_bins;
-
-        bool activity_detected = false;
-
-        if (average_in_window > (average_power / 2 + threshold)) {
-            activity_detected = true;
-        }
-
-        if (activity_detected) {
-            spdlog::info("Activity detected in frequency {}",
-                         x_axis_values[end_idx - start_idx / 2]);
-        }
-
-        scan_current_start_index += 1;
+    
+    detectedFrequenciesList->clear();
+    
+    std::vector<double> sortedFreqs = detectedFrequencies;
+    std::sort(sortedFreqs.begin(), sortedFreqs.end());
+    
+    for (const auto& freq : sortedFreqs) {
+        QString freqText = QString("%1 MHz").arg(freq, 0, 'f', 3);
+        QListWidgetItem* item = new QListWidgetItem(freqText, detectedFrequenciesList);
+        item->setData(Qt::UserRole, freq);
     }
+}
 
-    if (scan_current_start_index + scan_window_size_bins > total_bins) {
-        scan_current_start_index = 0;
+void MainWindow::onDetectedFrequencyClicked(QListWidgetItem* item) {
+    if (!item || !frequencySpinBox) {
+        return;
+    }
+    
+    double freq_mhz = item->data(Qt::UserRole).toDouble();
+    
+    frequencySpinBox->setValue(freq_mhz);
+    
+    applyConfig();
+}
+
+void MainWindow::activeFreqCleanup() {
+    detectedFrequencies.clear();
+    updateDetectedFrequenciesList();
+}
+
+void MainWindow::appendLog(QString text) {
+    if (!logTextEdit) {
+        return;
+    }
+    logTextEdit->appendPlainText(text);
+    QTextCursor c = logTextEdit->textCursor();
+    c.movePosition(QTextCursor::End);
+    logTextEdit->setTextCursor(c);
+    QString content = logTextEdit->toPlainText();
+    int lineCount = content.count('\n') + (content.isEmpty() ? 0 : 1);
+    if (lineCount > maxLogLines) {
+        int removeCount = lineCount - maxLogLines;
+        int pos = 0;
+        for (int i = 0; i < removeCount && pos < content.size(); ++i) {
+            int next = content.indexOf('\n', pos);
+            pos = (next >= 0) ? next + 1 : content.size();
+        }
+        logTextEdit->setPlainText(content.mid(pos));
     }
 }
 
@@ -418,4 +657,63 @@ void MainWindow::setupVolumeSliderConnection() {
         }
     }
 #endif
+}
+
+double MainWindow::getRbwHz() const {
+    if (fftSize <= 0) {
+        return 1.0;
+    }
+    return alloc_params.sample_rate / static_cast<double>(fftSize);
+}
+
+double MainWindow::getDetectionToleranceMHz() const {
+    const double rbw_hz = getRbwHz();
+    const double adaptive_hz = std::max(
+        MIN_FREQUENCY_TOLERANCE_MHZ * 1e6,
+        MERGE_WIDTH_CHANNEL_FACTOR * std::max(DETECTOR_CHANNEL_WIDTH_HZ, 6.0 * rbw_hz));
+    return adaptive_hz / 1e6;
+}
+
+double MainWindow::estimateSubBinFrequencyMHz(int bin) const {
+    if (bin <= 0 || bin >= fftSize - 1 ||
+        spectrum_db.size() != static_cast<size_t>(fftSize) ||
+        x_axis_values.size() != static_cast<size_t>(fftSize)) {
+        if (bin >= 0 && bin < static_cast<int>(x_axis_values.size())) {
+            return x_axis_values[static_cast<size_t>(bin)];
+        }
+        return alloc_params.center_freq / 1e6;
+    }
+
+    const double left = spectrum_db[static_cast<size_t>(bin - 1)];
+    const double center = spectrum_db[static_cast<size_t>(bin)];
+    const double right = spectrum_db[static_cast<size_t>(bin + 1)];
+    const double denom = (left - 2.0 * center + right);
+    double delta = 0.0;
+    if (std::abs(denom) > 1e-12) {
+        delta = 0.5 * (left - right) / denom;
+        delta = std::clamp(delta, -0.5, 0.5);
+    }
+
+    const double rbw_mhz = getRbwHz() / 1e6;
+    return x_axis_values[static_cast<size_t>(bin)] + delta * rbw_mhz;
+}
+
+void MainWindow::updateDspMetricsInfo() {
+    if (!rbwLabel || !detectionToleranceLabel) {
+        return;
+    }
+    const double rbw = getRbwHz();
+    const double tol_mhz = getDetectionToleranceMHz();
+    rbwLabel->setText(QString("%1").arg(rbw, 0, 'f', 1));
+    detectionToleranceLabel->setText(QString("%1")
+                                         .arg(tol_mhz * 1e3, 0, 'f', 2));
+}
+
+void MainWindow::logBaselineMetrics(const char *context) const {
+    const double rbw_hz = getRbwHz();
+    const double tolerance_hz = getDetectionToleranceMHz() * 1e6;
+    spdlog::info(
+        "DSP metrics [{}]: center={} Hz, sample_rate={} Hz, fft_size={}, rbw={} Hz/bin, detection_tolerance={} Hz",
+        context, alloc_params.center_freq, alloc_params.sample_rate, fftSize,
+        rbw_hz, tolerance_hz);
 }

@@ -1,14 +1,11 @@
 #include "MainWindow.hpp"
 #include "MainWindowConstants.hpp"
+#include <QFontDatabase>
 #include <QMessageBox>
 #include <QSignalBlocker>
 
 void MainWindow::configure() {
     scan_current_start_index = 0;
-    WINDOW_SIZE_BY_FFTSIZE[512] = 6;
-    WINDOW_SIZE_BY_FFTSIZE[1024] = 13;
-    WINDOW_SIZE_BY_FFTSIZE[2048] = 26;
-    WINDOW_SIZE_BY_FFTSIZE[4096] = 51;
 }
 
 void MainWindow::setupPlot() {
@@ -17,13 +14,11 @@ void MainWindow::setupPlot() {
     plot->clearItems();
 
     if (waterfallColorScale) {
-        // Disconnect from waterfallMap first if it exists
         if (waterfallMap) {
             waterfallMap->setColorScale(nullptr);
         }
         plot->plotLayout()->remove(waterfallColorScale);
         plot->plotLayout()->simplify();
-        // Use delete instead of deleteLater() to avoid segfault on Raspberry Pi 5
         delete waterfallColorScale;
         waterfallColorScale = nullptr;
     }
@@ -49,7 +44,7 @@ void MainWindow::setupPlot() {
         plot->graph(0)->setPen(QPen(Qt::blue));
         plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
         plot->xAxis->setLabel("Frequency (MHz)");
-        plot->yAxis->setLabel("Amplitude (dB)");
+        plot->yAxis->setLabel("Amplitude (dBFS)");
 
         QVector<double> x(fftSize), y(fftSize), y2(fftSize);
         for (int i = 0; i < fftSize; ++i) {
@@ -69,6 +64,7 @@ void MainWindow::setupPlot() {
         waterfallMap->setColorScale(waterfallColorScale);
         waterfallMap->setInterpolate(false);
         waterfallMap->setGradient(QCPColorGradient::gpThermal);
+        waterfallColorScale->setDataRange(QCPRange(-100.0, 50.0));  // фиксированная шкала dB (как у спектра)
 
         QCPColorMapData *data = waterfallMap->data();
         data->setSize(fftSize, waterfallHistorySize);
@@ -86,6 +82,7 @@ void MainWindow::setupPlot() {
         plot->yAxis->setRange(0, waterfallHistorySize);
     }
 
+    updatePlotTheme(darkTheme_);
     plot->replot();
 }
 
@@ -171,6 +168,21 @@ void MainWindow::setupControls() {
 
 void MainWindow::setupInfo() {
     averagePowerLabel = new QLabel(QString::number(average_power));
+    rbwLabel = new QLabel("--");
+    detectionToleranceLabel = new QLabel("--");
+    updateDspMetricsInfo();
+}
+
+void MainWindow::setupMenuBar() {
+    QMenu *viewMenu = menuBar()->addMenu(tr("Вид"));
+    darkThemeAction = viewMenu->addAction(tr("Тёмная тема"));
+    darkThemeAction->setCheckable(true);
+    darkThemeAction->setChecked(true);
+    connect(darkThemeAction, &QAction::triggered, this, &MainWindow::setDarkTheme);
+    lightThemeAction = viewMenu->addAction(tr("Светлая тема"));
+    lightThemeAction->setCheckable(true);
+    lightThemeAction->setChecked(false);
+    connect(lightThemeAction, &QAction::triggered, this, &MainWindow::setLightTheme);
 }
 
 void MainWindow::setupToolbar() {
@@ -250,19 +262,65 @@ void MainWindow::setupLayout() {
     listeningInfoGroup->setLayout(listeningInfoLayout);
     listeningInfoGroup->setFixedWidth(300);
 
-    QVBoxLayout *rightPanelLayout = new QVBoxLayout;
-    rightPanelLayout->addWidget(listeningInfoGroup);
-    rightPanelLayout->addWidget(controls);
-    rightPanelLayout->addWidget(info);
-    rightPanelLayout->addStretch();
+    if (!detectedFrequenciesGroup) {
+        detectedFrequenciesGroup = new QGroupBox(tr("Задетектированные частоты"), this);
+        QVBoxLayout *detectedFreqLayout = new QVBoxLayout;
+        
+        if (!detectedFrequenciesList) {
+            detectedFrequenciesList = new QListWidget(this);
+            detectedFrequenciesList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            connect(detectedFrequenciesList, &QListWidget::itemClicked, this,
+                    &MainWindow::onDetectedFrequencyClicked);
+        }
+        
+        detectedFreqLayout->addWidget(detectedFrequenciesList);
+        if (!clearDetectedButton) {
+            clearDetectedButton = new QPushButton(tr("Очистить список"), this);
+            connect(clearDetectedButton, &QPushButton::clicked, this, &MainWindow::activeFreqCleanup);
+        }
+        detectedFreqLayout->addWidget(clearDetectedButton);
+        detectedFrequenciesGroup->setLayout(detectedFreqLayout);
+    }
 
-    QWidget *rightPanelWidget = new QWidget(this);
-    rightPanelWidget->setLayout(rightPanelLayout);
-    rightPanelWidget->setFixedWidth(300);
+    if (!logGroup) {
+        logGroup = new QGroupBox(tr("Лог"), this);
+        logTextEdit = new QPlainTextEdit(this);
+        logTextEdit->setReadOnly(true);
+        logTextEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        logTextEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        QVBoxLayout *logLayout = new QVBoxLayout;
+        logLayout->addWidget(logTextEdit);
+        logGroup->setLayout(logLayout);
+    }
 
-    QHBoxLayout *mainLayout = new QHBoxLayout;
-    mainLayout->addWidget(plot);
-    mainLayout->addWidget(rightPanelWidget);
+    QVBoxLayout *configColumnLayout = new QVBoxLayout;
+    configColumnLayout->addWidget(listeningInfoGroup);
+    configColumnLayout->addWidget(controls);
+    configColumnLayout->addWidget(info);
+    configColumnLayout->addStretch();
+
+    QWidget *configColumnWidget = new QWidget(this);
+    configColumnWidget->setLayout(configColumnLayout);
+    configColumnWidget->setFixedWidth(300);
+
+    QHBoxLayout *topRowLayout = new QHBoxLayout;
+    topRowLayout->addWidget(plot, 1);
+    topRowLayout->addWidget(configColumnWidget);
+
+    QWidget *topRowWidget = new QWidget(this);
+    topRowWidget->setLayout(topRowLayout);
+
+    QHBoxLayout *bottomRowLayout = new QHBoxLayout;
+    bottomRowLayout->addWidget(detectedFrequenciesGroup, 1);
+    bottomRowLayout->addWidget(logGroup, 1);
+
+    QWidget *bottomRowWidget = new QWidget(this);
+    bottomRowWidget->setLayout(bottomRowLayout);
+    bottomRowWidget->setMaximumHeight(220);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout;
+    mainLayout->addWidget(topRowWidget, 1);
+    mainLayout->addWidget(bottomRowWidget);
 
     centralWidget->setLayout(mainLayout);
 
