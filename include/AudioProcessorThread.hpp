@@ -16,8 +16,9 @@ public:
     explicit AudioProcessorThread(QObject *parent = nullptr);
     ~AudioProcessorThread();
 
-    void processIQSamples(std::vector<std::complex<float>> iq_samples, 
-                         double sample_rate, int audio_rate);
+    void processIQSamples(std::vector<std::complex<float>> iq_samples,
+                         double sample_rate, int audio_rate,
+                         double demod_if_offset_hz);
     void stopProcessing();
     void resetDSPState();
     void clearPendingQueue();
@@ -30,12 +31,14 @@ protected:
 
 private:
     std::vector<int16_t> processDemodulation(const std::vector<std::complex<float>> &iq_samples,
-                                            double sample_rate, int audio_rate);
+                                            double sample_rate, int audio_rate,
+                                            double demod_if_offset_hz);
 
     struct ProcessingData {
         std::vector<std::complex<float>> iq_samples;
         double sample_rate = 0.0;
         int audio_rate = 0;
+        double demod_if_offset_hz = 0.0;
         bool valid = false;
     };
 
@@ -49,7 +52,8 @@ private:
         float voice_hp2_prev_output = 0.0f;
         std::complex<float> channel_lp_state{0.0f, 0.0f};
         double residual_freq_estimate_hz = 0.0;
-        
+        double mixer_phase_rad = 0.0;
+
         void reset() {
             dc_accumulator = 0.0f;
             deemphasis_state = 0.0f;
@@ -60,6 +64,7 @@ private:
             voice_hp2_prev_output = 0.0f;
             channel_lp_state = std::complex<float>(0.0f, 0.0f);
             residual_freq_estimate_hz = 0.0;
+            mixer_phase_rad = 0.0;
         }
     };
 

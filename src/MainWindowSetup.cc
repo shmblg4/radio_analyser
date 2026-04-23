@@ -3,6 +3,8 @@
 #include <QFontDatabase>
 #include <QMessageBox>
 #include <QSignalBlocker>
+#include <cmath>
+#include <algorithm>
 
 void MainWindow::configure() {
     scan_current_start_index = 0;
@@ -257,7 +259,56 @@ void MainWindow::setupLayout() {
     volumeLayout->addWidget(volumeSlider);
     volumeLayout->addWidget(volumeLabel);
     listeningInfoLayout->addLayout(volumeLayout);
-    
+
+    if (!demodOffsetSpinBox) {
+        demodOffsetSpinBox = new QDoubleSpinBox(this);
+        demodOffsetSpinBox->setRange(-25000.0, 25000.0);
+        demodOffsetSpinBox->setValue(12000.0);
+        demodOffsetSpinBox->setSingleStep(100.0);
+        demodOffsetSpinBox->setDecimals(0);
+        demodOffsetSpinBox->setSuffix(QStringLiteral(" Hz"));
+        connect(demodOffsetSpinBox,
+                static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+                this, [this](double value_hz) {
+            if (!listeningActive || !device || !frequencySpinBox) {
+                return;
+            }
+
+            const double desired_center_hz = frequencySpinBox->value() * 1e6;
+            const double tuned_center_hz =
+                std::max(0.0, desired_center_hz + value_hz);
+            const uint64_t new_center_freq =
+                static_cast<uint64_t>(std::llround(tuned_center_hz));
+            if (new_center_freq == alloc_params.center_freq) {
+                return;
+            }
+
+            alloc_params.center_freq = new_center_freq;
+            device->stopRx();
+            if (!device->configure(alloc_params) || !device->startRx()) {
+                listeningActive = false;
+                if (listenToggleButton) {
+                    listenToggleButton->setText(tr("Старт прослушивания"));
+                }
+                if (audioTimer) {
+                    audioTimer->stop();
+                }
+                updateListeningParameterControls();
+                updateListeningStatus();
+                QMessageBox::critical(this, tr("Ошибка"),
+                                      tr("Не удалось применить offset tuning."));
+                return;
+            }
+
+            setupPlot();
+            updateDspMetricsInfo();
+            updateListeningStatus();
+        });
+    }
+    listeningInfoLayout->addWidget(
+        new QLabel(tr("Уход от нуля (IF offset):"), this));
+    listeningInfoLayout->addWidget(demodOffsetSpinBox);
+
     listeningInfoLayout->addStretch();
     listeningInfoGroup->setLayout(listeningInfoLayout);
     listeningInfoGroup->setFixedWidth(300);

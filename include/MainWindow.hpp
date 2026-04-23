@@ -131,6 +131,7 @@ private:
     QLabel *volumeLabel;
     QLabel *listeningStatusLabel;
     QLabel *listeningFrequencyLabel;
+    QDoubleSpinBox *demodOffsetSpinBox = nullptr;
 
     QGroupBox *detectedFrequenciesGroup;
     QListWidget *detectedFrequenciesList;

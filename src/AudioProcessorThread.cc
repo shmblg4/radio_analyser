@@ -30,7 +30,8 @@ void AudioProcessorThread::clearPendingQueue() {
 }
 
 void AudioProcessorThread::processIQSamples(std::vector<std::complex<float>> iq_samples,
-                                           double sample_rate, int audio_rate) {
+                                           double sample_rate, int audio_rate,
+                                           double demod_if_offset_hz) {
     if (should_stop_ || iq_samples.empty()) {
         return;
     }
@@ -39,6 +40,7 @@ void AudioProcessorThread::processIQSamples(std::vector<std::complex<float>> iq_
     data.iq_samples = std::move(iq_samples);
     data.sample_rate = sample_rate;
     data.audio_rate = audio_rate;
+    data.demod_if_offset_hz = demod_if_offset_hz;
     data.valid = true;
 
     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -66,9 +68,10 @@ void AudioProcessorThread::run() {
         }
 
         if (has_data && !data.iq_samples.empty()) {
-            auto audio_samples = processDemodulation(data.iq_samples, 
-                                                     data.sample_rate, 
-                                                     data.audio_rate);
+            auto audio_samples = processDemodulation(data.iq_samples,
+                                                     data.sample_rate,
+                                                     data.audio_rate,
+                                                     data.demod_if_offset_hz);
             if (!audio_samples.empty()) {
                 emit audioSamplesReady(audio_samples);
             }
@@ -82,7 +85,8 @@ void AudioProcessorThread::run() {
 
 std::vector<int16_t> AudioProcessorThread::processDemodulation(
     const std::vector<std::complex<float>> &iq_samples,
-    double sample_rate, int audio_rate) {
+    double sample_rate, int audio_rate,
+    double demod_if_offset_hz) {
 
     if (iq_samples.size() < 2) {
         return {};
@@ -119,8 +123,27 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     std::complex<float> decim_acc(0.0f, 0.0f);
     int decim_count = 0;
 
+    const double dphase_rad =
+        (demod_if_offset_hz != 0.0)
+            ? (2.0 * M_PI * demod_if_offset_hz / sample_rate)
+            : 0.0;
+
     for (size_t i = 0; i < iq_samples.size(); ++i) {
-        const std::complex<float> shifted = iq_samples[i];
+        std::complex<float> shifted;
+        if (dphase_rad != 0.0) {
+            const float cr = static_cast<float>(std::cos(local_state.mixer_phase_rad));
+            const float ci = static_cast<float>(std::sin(local_state.mixer_phase_rad));
+            shifted = iq_samples[i] * std::complex<float>(cr, ci);
+            local_state.mixer_phase_rad += dphase_rad;
+            while (local_state.mixer_phase_rad > M_PI) {
+                local_state.mixer_phase_rad -= 2.0 * M_PI;
+            }
+            while (local_state.mixer_phase_rad < -M_PI) {
+                local_state.mixer_phase_rad += 2.0 * M_PI;
+            }
+        } else {
+            shifted = iq_samples[i];
+        }
 
         local_state.channel_lp_state = lp_alpha_f * shifted +
                             lp_one_minus_alpha * local_state.channel_lp_state;

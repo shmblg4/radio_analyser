@@ -9,6 +9,7 @@
 
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <QMessageBox>
 #include <spdlog/spdlog.h>
 
@@ -22,8 +23,14 @@ void MainWindow::toggleListening() {
     if (!listeningActive) {
         listeningActive = true;
 
+        const double desired_center_hz =
+            frequencySpinBox ? (frequencySpinBox->value() * 1e6) : 0.0;
+        const double demod_if_offset_hz =
+            demodOffsetSpinBox ? demodOffsetSpinBox->value() : 0.0;
+        const double tuned_center_hz =
+            std::max(0.0, desired_center_hz + demod_if_offset_hz);
         alloc_params.center_freq =
-            static_cast<uint64_t>(frequencySpinBox->value() * 1e6);
+            static_cast<uint64_t>(std::llround(tuned_center_hz));
         alloc_params.sample_rate =
             static_cast<double>(sampleRateSpinBox->value() * 1e6);
         alloc_params.bandwidth =
@@ -67,8 +74,12 @@ void MainWindow::toggleListening() {
                 return;
             }
         }
-        spdlog::info("Starting audio processing: freq={} Hz, sample_rate={} Hz, bandwidth={} Hz",
-                    alloc_params.center_freq, alloc_params.sample_rate, alloc_params.bandwidth);
+        spdlog::info("Starting audio processing: target_freq={} Hz, tuned_freq={} Hz, if_offset={} Hz, sample_rate={} Hz, bandwidth={} Hz",
+                     static_cast<uint64_t>(std::llround(desired_center_hz)),
+                     alloc_params.center_freq,
+                     demod_if_offset_hz,
+                     alloc_params.sample_rate,
+                     alloc_params.bandwidth);
         if (audioProcessorThread) {
             audioProcessorThread->resetDSPState();
             audioProcessorThread->clearPendingQueue();
@@ -127,7 +138,10 @@ void MainWindow::processAudio() {
 
     updateSpectrumFromIQ(iq_samples);
     
-    audioProcessorThread->processIQSamples(std::move(iq_samples), in_sample_rate, audio_rate);
+    const double demod_if_offset_hz =
+        demodOffsetSpinBox ? demodOffsetSpinBox->value() : 0.0;
+    audioProcessorThread->processIQSamples(std::move(iq_samples), in_sample_rate,
+                                           audio_rate, demod_if_offset_hz);
 #endif
 }
 
@@ -163,7 +177,9 @@ void MainWindow::updateListeningStatus() {
 
     if (listeningFrequencyLabel) {
         if (listeningActive && device) {
-            double freq_mhz = alloc_params.center_freq / 1e6;
+            const double freq_mhz =
+                frequencySpinBox ? frequencySpinBox->value()
+                                 : (alloc_params.center_freq / 1e6);
             listeningFrequencyLabel->setText(
                 QString(tr("Частота: %1 MHz")).arg(freq_mhz, 0, 'f', 3));
         } else {
