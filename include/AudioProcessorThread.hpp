@@ -39,7 +39,6 @@ private:
         bool valid = false;
     };
 
-    // DSP state structure - protected by dsp_state_mutex_
     struct DSPState {
         float dc_accumulator = 0.0f;
         float deemphasis_state = 0.0f;
@@ -66,11 +65,9 @@ private:
 
     static constexpr size_t kMaxPendingChunks = 4;
     
-    // Queue mutex - protects pending_queue_
     std::mutex queue_mutex_;
     std::deque<ProcessingData> pending_queue_;
     
-    // DSP state mutex - protects all DSP state variables
     mutable std::mutex dsp_state_mutex_;
     DSPState dsp_state_;
     
@@ -78,5 +75,5 @@ private:
     std::atomic<bool> should_stop_{false};
 };
 
-#endif // AUDIOPROCESSORTHREAD_HPP
+#endif
 

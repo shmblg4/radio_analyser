@@ -112,7 +112,6 @@ void MainWindow::processAudio() {
         return;
     }
 
-    // For exact-tuned channels, IQ DC removal can suppress the wanted carrier.
     auto iq_samples = device->getIQSamplesForProcessing(false);
     if (iq_samples.size() < 2) {
         return;
@@ -126,10 +125,8 @@ void MainWindow::processAudio() {
     const double in_sample_rate = alloc_params.sample_rate;
     const int audio_rate = audioSampleRate;
 
-    // Update spectrum display first (before moving the data)
     updateSpectrumFromIQ(iq_samples);
     
-    // Then send to audio processor using move semantics
     audioProcessorThread->processIQSamples(std::move(iq_samples), in_sample_rate, audio_rate);
 #endif
 }

@@ -15,7 +15,7 @@ struct hackrf_alloc_params {
     uint32_t bandwidth = 0;
     uint32_t vga_gain = 0;
     uint32_t lna_gain = 0;
-    int fft_size = 0;  // Changed from uint16_t to int for safety
+    int fft_size = 0;
 };
 
 class HackrfDevice {
@@ -26,7 +26,7 @@ public:
     bool configure(const hackrf_alloc_params& alloc_params);
 
     bool startRx();
-    bool stopRx();  // Changed to return bool for error checking
+    bool stopRx();
 
     std::vector<std::complex<float>> getIQSamplesForProcessing(
         bool remove_dc = true);

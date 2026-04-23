@@ -36,7 +36,7 @@ void AudioProcessorThread::processIQSamples(std::vector<std::complex<float>> iq_
     }
 
     ProcessingData data;
-    data.iq_samples = std::move(iq_samples);  // Move instead of copy
+    data.iq_samples = std::move(iq_samples);
     data.sample_rate = sample_rate;
     data.audio_rate = audio_rate;
     data.valid = true;
@@ -98,18 +98,14 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     const double channel_sample_rate = sample_rate / channel_decim;
     const float limiter_threshold = 0.005f;
 
-    // FM deviation for narrowband FM (typical: 5 kHz for voice)
     const double fm_deviation_hz = 5000.0;
 
-    // Get current DSP state with lock
     DSPState local_state;
     {
         std::lock_guard<std::mutex> lock(dsp_state_mutex_);
         local_state = dsp_state_;
     }
 
-    // Wideband FM on IQ makes estimateResidualCarrierHz() follow modulation, not
-    // LO offset — logs showed kHz-class "residual" during TX and audible whistle.
     local_state.residual_freq_estimate_hz = 0.0;
 
     std::vector<std::complex<float>> channelized;
@@ -176,7 +172,6 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         return {};
     }
 
-    // DC removal filter
     {
         const float dc_alpha = 0.995f;
         const float dc_one_minus_alpha = 1.0f - dc_alpha;
@@ -197,8 +192,6 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         v = local_state.deemphasis_state;
     }
 
-    // Two cascaded 1st-order HPFs (~380 Hz) attenuate CTCSS/DCS sub-audio (67–254 Hz)
-    // much more than a single soft HPF at 300 Hz (H8).
     const double voice_low_cut_hz = 380.0;
     const double voice_high_cut_hz = 3000.0;
     const float hp_alpha = static_cast<float>(
@@ -227,7 +220,6 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         filtered_demod.push_back(local_state.voice_lp_state);
     }
 
-    // Save DSP state back with lock after all filters update.
     {
         std::lock_guard<std::mutex> lock(dsp_state_mutex_);
         dsp_state_ = local_state;

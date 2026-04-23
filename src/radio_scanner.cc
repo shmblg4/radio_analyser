@@ -6,7 +6,6 @@
 #include <stdexcept>
 #include <unordered_map>
 
-// RAII wrapper for FFTW complex arrays
 class FFTWBuffer {
 public:
     explicit FFTWBuffer(int size) : size_(size), data_(nullptr) {
@@ -26,11 +25,9 @@ public:
         }
     }
     
-    // Non-copyable
     FFTWBuffer(const FFTWBuffer&) = delete;
     FFTWBuffer& operator=(const FFTWBuffer&) = delete;
     
-    // Movable
     FFTWBuffer(FFTWBuffer&& other) noexcept : size_(other.size_), data_(other.data_) {
         other.data_ = nullptr;
         other.size_ = 0;
@@ -61,7 +58,6 @@ private:
     fftw_complex* data_;
 };
 
-// RAII wrapper for FFTW plan
 class FFTWPlan {
 public:
     FFTWPlan() : plan_(nullptr) {}
@@ -79,11 +75,9 @@ public:
         }
     }
     
-    // Non-copyable
     FFTWPlan(const FFTWPlan&) = delete;
     FFTWPlan& operator=(const FFTWPlan&) = delete;
     
-    // Movable
     FFTWPlan(FFTWPlan&& other) noexcept : plan_(other.plan_) {
         other.plan_ = nullptr;
     }
@@ -111,7 +105,6 @@ private:
     fftw_plan plan_;
 };
 
-// Cached FFTW resources for performance
 class FFTWCache {
 public:
     static FFTWCache& instance() {
@@ -119,7 +112,6 @@ public:
         return cache;
     }
     
-    // Get or create cached plan and buffers for given FFT size
     struct FFTResources {
         fftw_complex* in;
         fftw_complex* out;
@@ -134,7 +126,6 @@ public:
             return {it->second.in, it->second.out, it->second.plan};
         }
         
-        // Create new resources
         CachedEntry entry;
         entry.in = static_cast<fftw_complex*>(
             fftw_malloc(sizeof(fftw_complex) * static_cast<size_t>(fft_size)));
@@ -222,7 +213,6 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
 
     const int sample_count = static_cast<int>(samples.size());
     if (sample_count > 1) {
-        // Apply Hann window
         const double pi2 = 2.0 * M_PI;
         const double denom = static_cast<double>(sample_count - 1);
         for (int i = 0; i < sample_count; ++i) {
@@ -231,19 +221,15 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
         }
     }
 
-    // Use cached FFTW resources
     auto resources = FFTWCache::instance().getResources(fft_size);
     
-    // Copy input data
     for (int i = 0; i < fft_size; ++i) {
         resources.in[i][0] = static_cast<double>(samples[static_cast<size_t>(i)].real());
         resources.in[i][1] = static_cast<double>(samples[static_cast<size_t>(i)].imag());
     }
     
-    // Execute FFT
     fftw_execute(resources.plan);
 
-    // Calculate magnitudes
     std::vector<double> magnitudes(static_cast<size_t>(fft_size));
     for (int i = 0; i < fft_size; ++i) {
         const double re = resources.out[i][0];
@@ -251,7 +237,6 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
         magnitudes[static_cast<size_t>(i)] = std::sqrt(re * re + im * im);
     }
 
-    // FFT shift: swap halves to center DC
     const int half_size = fft_size / 2;
     for (int i = 0; i < half_size; ++i) {
         std::swap(magnitudes[static_cast<size_t>(i)], 
@@ -368,11 +353,9 @@ bool HackrfDevice::configureDevice() {
 }
 
 bool HackrfDevice::validateGains(int vga_gain, int lna_gain) const {
-    // VGA gain: 0-62, step 2
     if (vga_gain < 0 || vga_gain > 62 || vga_gain % 2 != 0) {
         return false;
     }
-    // LNA gain: 0-40, step 8
     if (lna_gain < 0 || lna_gain > 40 || lna_gain % 8 != 0) {
         return false;
     }
@@ -417,7 +400,7 @@ bool HackrfDevice::startRx() {
 bool HackrfDevice::stopRx() {
     if (!running_.load()) {
         spdlog::warn("RX already stopped");
-        return true;  // Not an error, just already stopped
+        return true;
     }
     
     if (!device_) {
@@ -429,7 +412,7 @@ bool HackrfDevice::stopRx() {
     if (result != HACKRF_SUCCESS) {
         spdlog::error("Failed to stop RX: {}",
                       hackrf_error_name(static_cast<hackrf_error>(result)));
-        running_.store(false);  // Mark as stopped anyway
+        running_.store(false);
         return false;
     }
     
@@ -502,7 +485,6 @@ HackrfDevice::convertRawSamples(const std::vector<int8_t>& raw_samples) const {
     iq_samples.reserve(num_samples);
 
     for (size_t i = 0; i < num_samples; ++i) {
-        // Normalize to [-1, 1] range (approximately)
         float i_val = static_cast<float>(raw_samples[2 * i]) / 128.0f;
         float q_val = static_cast<float>(raw_samples[2 * i + 1]) / 128.0f;
         iq_samples.emplace_back(i_val, q_val);
@@ -522,7 +504,6 @@ void HackrfDevice::removeDCOffset(std::vector<std::complex<float>>& iq_samples) 
     
     std::lock_guard<std::mutex> lock(dc_mutex_);
     
-    // Single-pole IIR highpass filter for DC removal
     const float dc_alpha = 0.995f;
     const float dc_one_minus_alpha = 1.0f - dc_alpha;
     

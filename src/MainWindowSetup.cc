@@ -64,7 +64,7 @@ void MainWindow::setupPlot() {
         waterfallMap->setColorScale(waterfallColorScale);
         waterfallMap->setInterpolate(false);
         waterfallMap->setGradient(QCPColorGradient::gpThermal);
-        waterfallColorScale->setDataRange(QCPRange(-100.0, 50.0));  // фиксированная шкала dB (как у спектра)
+        waterfallColorScale->setDataRange(QCPRange(-100.0, 50.0));
 
         QCPColorMapData *data = waterfallMap->data();
         data->setSize(fftSize, waterfallHistorySize);

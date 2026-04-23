@@ -64,7 +64,7 @@ double estimateToneFreqHz(const std::vector<std::complex<double>> &samples,
     return freqHz;
 }
 
-} // namespace
+}
 
 int main() {
     const double max128 = normalizeBy128(127);

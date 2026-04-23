@@ -31,7 +31,7 @@ MainWindow::MainWindow(QWidget *parent)
       activeFreqCleanupTimer(new QTimer(this)),
       alloc_params({static_cast<uint64_t>(405.125 * 1e6),
                     static_cast<uint64_t>(4.8 * 1e6),
-                    static_cast<uint32_t>(2.0 * 1e6), 0, 0, 1024}),
+                    static_cast<uint32_t>(2.0 * 1e6), 20, 24, 1024}),
       fftSize(1024),
       average_power(0.0),
       threshold(0),
@@ -317,7 +317,7 @@ void MainWindow::refreshSpectrumPlot() {
             data->setValueRange(QCPRange(0, waterfallHistorySize));
 
             const int rows = static_cast<int>(waterfallHistory.size());
-            constexpr double emptyCellDb = -200.0;  // значение для пустых ячеек (ниже фиксированной шкалы)
+            constexpr double emptyCellDb = -200.0;
             for (int j = 0; j < waterfallHistorySize; ++j) {
                 int srcIndex = rows - 1 - j;
                 const QVector<double> *rowPtr =
