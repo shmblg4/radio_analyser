@@ -1,4 +1,5 @@
 #include "MainWindow.hpp"
+#include "AnalysisParams.hpp"
 #include "MainWindowConstants.hpp"
 #include <QFontDatabase>
 #include <QMessageBox>
@@ -26,36 +27,52 @@ void MainWindow::setupPlot() {
     }
     waterfallMap = nullptr;
 
-    double freq_resolution_hz = alloc_params.sample_rate / fftSize;
-    double start_freq_hz =
-        (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
-    double end_freq_hz =
-        (alloc_params.center_freq + alloc_params.sample_rate / 2.0);
-    double freq_resolution_mhz = freq_resolution_hz / 1e6;
-    double start_freq_mhz = start_freq_hz / 1e6;
-    double end_freq_mhz = end_freq_hz / 1e6;
+    double display_center_mhz =
+        frequencySpinBox ? frequencySpinBox->value()
+                         : analysisSweepPlan_.center_freq_mhz;
+    double display_span_mhz = analysisSweepPlan_.requested_span_mhz;
+    if (appMode_ == AppMode::Detection) {
+        display_center_mhz = alloc_params.center_freq / 1e6;
+        display_span_mhz = alloc_params.sample_rate / 1e6;
+    }
+
+    const double start_freq_mhz = display_center_mhz - display_span_mhz / 2.0;
+    const double end_freq_mhz = display_center_mhz + display_span_mhz / 2.0;
+    const double freq_resolution_mhz =
+        display_span_mhz / static_cast<double>(std::max(1, fftSize));
 
     x_axis_values.resize(fftSize);
+    plot_x_cache_.resize(fftSize);
     for (int i = 0; i < fftSize; ++i) {
         x_axis_values[i] = start_freq_mhz + (i * freq_resolution_mhz);
+        plot_x_cache_[i] = x_axis_values[i];
     }
+
+    const int wf_bins = waterfallDisplayBins();
 
     if (currentPlotMode == PlotMode::Spectrum) {
         plot->addGraph();
-        plot->addGraph();
+        if (appMode_ == AppMode::Detection) {
+            plot->addGraph();
+            plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
+        }
         plot->graph(0)->setPen(QPen(Qt::blue));
-        plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
         plot->xAxis->setLabel("Frequency (MHz)");
         plot->yAxis->setLabel("Amplitude (dBFS)");
 
-        QVector<double> x(fftSize), y(fftSize), y2(fftSize);
+        QVector<double> x(fftSize), y(fftSize);
         for (int i = 0; i < fftSize; ++i) {
             x[i] = x_axis_values[i];
             y[i] = -200.0;
-            y2[i] = 0.0;
         }
         plot->graph(0)->setData(x, y);
-        plot->graph(1)->setData(x, y2);
+        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
+            QVector<double> y2(fftSize);
+            for (int i = 0; i < fftSize; ++i) {
+                y2[i] = average_power + threshold;
+            }
+            plot->graph(1)->setData(x, y2);
+        }
         plot->yAxis->setRange(-100.0, 50.0);
         plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
     } else {
@@ -69,11 +86,11 @@ void MainWindow::setupPlot() {
         waterfallColorScale->setDataRange(QCPRange(-100.0, 50.0));
 
         QCPColorMapData *data = waterfallMap->data();
-        data->setSize(fftSize, waterfallHistorySize);
+        data->setSize(wf_bins, waterfallHistorySize);
         data->setKeyRange(QCPRange(start_freq_mhz, end_freq_mhz));
         data->setValueRange(QCPRange(0, waterfallHistorySize));
         for (int j = 0; j < waterfallHistorySize; ++j) {
-            for (int i = 0; i < fftSize; ++i) {
+            for (int i = 0; i < wf_bins; ++i) {
                 data->setCell(i, j, -200.0);
             }
         }
@@ -95,22 +112,39 @@ void MainWindow::setupControls() {
     thresholdLabel = new QLabel(QString::number(threshold));
 
     frequencySpinBox = new QDoubleSpinBox();
-    frequencySpinBox->setRange(MIN_FREQ_MHZ, MAX_FREQ_MHZ);
-    frequencySpinBox->setValue(alloc_params.center_freq / 1e6);
+    frequencySpinBox->setRange(ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
+    frequencySpinBox->setValue(ANALYSIS_DEFAULT_FREQ_MHZ);
     frequencySpinBox->setSuffix(" MHz");
     frequencySpinBox->setSingleStep(0.001);
     frequencySpinBox->setDecimals(3);
 
+    analysisSpanSpinBox_ = new QDoubleSpinBox();
+    analysisSpanSpinBox_->setRange(ANALYSIS_MIN_SPAN_MHZ,
+                                   maxAnalysisSpanMHz(ANALYSIS_DEFAULT_FREQ_MHZ));
+    analysisSpanSpinBox_->setValue(ANALYSIS_DEFAULT_SPAN_MHZ);
+    analysisSpanSpinBox_->setSuffix(" MHz");
+    analysisSpanSpinBox_->setSingleStep(0.1);
+    analysisSpanSpinBox_->setDecimals(3);
+    connect(frequencySpinBox,
+            static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+            this, [this](double) { updateAnalysisSpanRange(); });
+
+    analysisFftBox_ = new QComboBox();
+    analysisFftBox_->addItem("512", 512);
+    analysisFftBox_->addItem("1024", 1024);
+    analysisFftBox_->setCurrentIndex(
+        analysisFftBox_->findData(ANALYSIS_DEFAULT_SWEEP_FFT_SIZE));
+
     sampleRateSpinBox = new QDoubleSpinBox();
     sampleRateSpinBox->setRange(MIN_SAMPLE_RATE_MHZ, MAX_SAMPLE_RATE_MHZ);
-    sampleRateSpinBox->setValue(alloc_params.sample_rate / 1e6);
+    sampleRateSpinBox->setValue(DETECTION_DEFAULT_SAMPLE_RATE_MHZ);
     sampleRateSpinBox->setSuffix(" MS/s");
     sampleRateSpinBox->setSingleStep(0.1);
     sampleRateSpinBox->setDecimals(3);
 
     bandwidthSpinBox = new QDoubleSpinBox();
     bandwidthSpinBox->setRange(MIN_BANDWIDTH_MHZ, MAX_BANDWIDTH_MHZ);
-    bandwidthSpinBox->setValue(alloc_params.bandwidth / 1e6);
+    bandwidthSpinBox->setValue(DETECTION_DEFAULT_BANDWIDTH_MHZ);
     bandwidthSpinBox->setSuffix(" MHz");
     bandwidthSpinBox->setSingleStep(0.1);
     bandwidthSpinBox->setDecimals(3);
@@ -162,16 +196,109 @@ void MainWindow::setupControls() {
     fftSizeBox->addItem("1024", 1024);
     fftSizeBox->addItem("2048", 2048);
     fftSizeBox->addItem("4096", 4096);
-    fftSizeBox->setCurrentIndex(fftSizeBox->findData(fftSize));
+    fftSizeBox->setCurrentIndex(fftSizeBox->findData(DETECTION_DEFAULT_FFT_SIZE));
 
     applyButton = new QPushButton(tr("Apply"));
     connect(applyButton, &QPushButton::clicked, this, &MainWindow::applyConfig);
+
+    analysisControlsGroup_ = new QGroupBox(tr("Анализ"));
+    QVBoxLayout *analysisLayout = new QVBoxLayout;
+    analysisLayout->addWidget(new QLabel(tr("Ширина полосы:")));
+    analysisLayout->addWidget(analysisSpanSpinBox_);
+    analysisLayout->addWidget(new QLabel(tr("FFT на сегмент:")));
+    analysisLayout->addWidget(analysisFftBox_);
+    analysisLayout->addWidget(applyButton);
+    analysisLayout->addStretch();
+    analysisControlsGroup_->setLayout(analysisLayout);
+
+    detectionControlsGroup_ = new QGroupBox(tr("Детектирование"));
+    QVBoxLayout *detectionLayout = new QVBoxLayout;
+    detectionLayout->addWidget(new QLabel(tr("Sample Rate (MS/s):")));
+    detectionLayout->addWidget(sampleRateSpinBox);
+    detectionLayout->addWidget(new QLabel(tr("Bandwidth (MHz):")));
+    detectionLayout->addWidget(bandwidthSpinBox);
+
+    QHBoxLayout *vgaLayout = new QHBoxLayout;
+    vgaLayout->addWidget(vgaSlider);
+    vgaLayout->addWidget(vgaLabel);
+    detectionLayout->addWidget(new QLabel(tr("VGA Gain:")));
+    detectionLayout->addLayout(vgaLayout);
+
+    QHBoxLayout *lnaLayout = new QHBoxLayout;
+    lnaLayout->addWidget(lnaSlider);
+    lnaLayout->addWidget(lnaLabel);
+    detectionLayout->addWidget(new QLabel(tr("LNA Gain:")));
+    detectionLayout->addLayout(lnaLayout);
+
+    QHBoxLayout *fftLayout = new QHBoxLayout;
+    fftLayout->addWidget(fftSizeBox);
+    fftLayout->addWidget(fftSizeLabel);
+    detectionLayout->addWidget(new QLabel(tr("FFT Size:")));
+    detectionLayout->addLayout(fftLayout);
+
+    QHBoxLayout *thresholdLayout = new QHBoxLayout;
+    thresholdLayout->addWidget(thresholdSlider);
+    thresholdLayout->addWidget(thresholdLabel);
+    detectionLayout->addWidget(new QLabel(tr("Threshold:")));
+    detectionLayout->addLayout(thresholdLayout);
+
+    QPushButton *detectionApplyButton = new QPushButton(tr("Apply"));
+    connect(detectionApplyButton, &QPushButton::clicked, this, &MainWindow::applyConfig);
+    detectionLayout->addWidget(detectionApplyButton);
+    detectionLayout->addStretch();
+    detectionControlsGroup_->setLayout(detectionLayout);
 }
 
 void MainWindow::setupInfo() {
     averagePowerLabel = new QLabel(QString::number(average_power));
     rbwLabel = new QLabel("--");
     detectionToleranceLabel = new QLabel("--");
+    segmentsInfoLabel_ = new QLabel("--");
+    totalBinsInfoLabel_ = new QLabel("--");
+    analysisHintLabel_ = new QLabel("--");
+    analysisHintLabel_->setWordWrap(true);
+
+    QVBoxLayout *infoLayout = new QVBoxLayout;
+
+    averagePowerRow_ = new QWidget(this);
+    QVBoxLayout *avgLayout = new QVBoxLayout(averagePowerRow_);
+    avgLayout->setContentsMargins(0, 0, 0, 0);
+    avgLayout->addWidget(new QLabel(tr("Average Power (dBFS):"), this));
+    avgLayout->addWidget(averagePowerLabel);
+    infoLayout->addWidget(averagePowerRow_);
+
+    infoLayout->addWidget(new QLabel(tr("RBW (Hz/bin):"), this));
+    infoLayout->addWidget(rbwLabel);
+
+    segmentsInfoRow_ = new QWidget(this);
+    QVBoxLayout *segmentsLayout = new QVBoxLayout(segmentsInfoRow_);
+    segmentsLayout->setContentsMargins(0, 0, 0, 0);
+    segmentsLayout->addWidget(new QLabel(tr("Сегментов (×5 MHz):"), this));
+    segmentsLayout->addWidget(segmentsInfoLabel_);
+    infoLayout->addWidget(segmentsInfoRow_);
+
+    totalBinsInfoRow_ = new QWidget(this);
+    QVBoxLayout *binsLayout = new QVBoxLayout(totalBinsInfoRow_);
+    binsLayout->setContentsMargins(0, 0, 0, 0);
+    binsLayout->addWidget(new QLabel(tr("FFT / всего bins:"), this));
+    binsLayout->addWidget(totalBinsInfoLabel_);
+    infoLayout->addWidget(totalBinsInfoRow_);
+
+    detectionToleranceRow_ = new QWidget(this);
+    QVBoxLayout *tolLayout = new QVBoxLayout(detectionToleranceRow_);
+    tolLayout->setContentsMargins(0, 0, 0, 0);
+    tolLayout->addWidget(new QLabel(tr("Detection Tolerance (kHz):"), this));
+    tolLayout->addWidget(detectionToleranceLabel);
+    infoLayout->addWidget(detectionToleranceRow_);
+
+    analysisHintRow_ = new QWidget(this);
+    QVBoxLayout *hintLayout = new QVBoxLayout(analysisHintRow_);
+    hintLayout->setContentsMargins(0, 0, 0, 0);
+    hintLayout->addWidget(analysisHintLabel_);
+    infoLayout->addWidget(analysisHintRow_);
+
+    infoLayout->addStretch();
+    info->setLayout(infoLayout);
     updateDspMetricsInfo();
 }
 
@@ -191,6 +318,28 @@ void MainWindow::setupToolbar() {
     if (!viewToolBar) {
         viewToolBar = addToolBar(tr("График"));
         viewToolBar->setMovable(false);
+    }
+
+    if (!analysisModeAction_) {
+        auto *modeGroup = new QActionGroup(this);
+        modeGroup->setExclusive(true);
+
+        analysisModeAction_ = viewToolBar->addAction(tr("Анализ"));
+        analysisModeAction_->setCheckable(true);
+        analysisModeAction_->setChecked(true);
+        modeGroup->addAction(analysisModeAction_);
+        connect(analysisModeAction_, &QAction::triggered, this, [this]() {
+            setAppMode(AppMode::Analysis);
+        });
+
+        detectionModeAction_ = viewToolBar->addAction(tr("Детектирование"));
+        detectionModeAction_->setCheckable(true);
+        modeGroup->addAction(detectionModeAction_);
+        connect(detectionModeAction_, &QAction::triggered, this, [this]() {
+            setAppMode(AppMode::Detection);
+        });
+
+        viewToolBar->addSeparator();
     }
 
     if (!plotModeAction) {
@@ -248,70 +397,70 @@ void MainWindow::setupLayout() {
         listeningFrequencyLabel = new QLabel(tr("Частота: -- MHz"), this);
     }
 
-    QGroupBox *listeningInfoGroup = new QGroupBox(tr("Прослушивание"), this);
-    QVBoxLayout *listeningInfoLayout = new QVBoxLayout;
-    
-    listeningInfoLayout->addWidget(listeningStatusLabel);
-    listeningInfoLayout->addWidget(listeningFrequencyLabel);
-    listeningInfoLayout->addWidget(listenToggleButton);
-    listeningInfoLayout->addWidget(new QLabel(tr("Громкость:"), this));
-    QHBoxLayout *volumeLayout = new QHBoxLayout;
-    volumeLayout->addWidget(volumeSlider);
-    volumeLayout->addWidget(volumeLabel);
-    listeningInfoLayout->addLayout(volumeLayout);
+    if (!listeningInfoGroup_) {
+        listeningInfoGroup_ = new QGroupBox(tr("Прослушивание"), this);
+        QVBoxLayout *listeningInfoLayout = new QVBoxLayout;
 
-    if (!demodOffsetSpinBox) {
-        demodOffsetSpinBox = new QDoubleSpinBox(this);
-        demodOffsetSpinBox->setRange(-25000.0, 25000.0);
-        demodOffsetSpinBox->setValue(12000.0);
-        demodOffsetSpinBox->setSingleStep(100.0);
-        demodOffsetSpinBox->setDecimals(0);
-        demodOffsetSpinBox->setSuffix(QStringLiteral(" Hz"));
-        connect(demodOffsetSpinBox,
-                static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
-                this, [this](double value_hz) {
-            if (!listeningActive || !device || !frequencySpinBox) {
-                return;
-            }
+        listeningInfoLayout->addWidget(listeningStatusLabel);
+        listeningInfoLayout->addWidget(listeningFrequencyLabel);
+        listeningInfoLayout->addWidget(listenToggleButton);
+        listeningInfoLayout->addWidget(new QLabel(tr("Громкость:"), this));
+        QHBoxLayout *volumeLayout = new QHBoxLayout;
+        volumeLayout->addWidget(volumeSlider);
+        volumeLayout->addWidget(volumeLabel);
+        listeningInfoLayout->addLayout(volumeLayout);
 
-            const double desired_center_hz = frequencySpinBox->value() * 1e6;
-            const double tuned_center_hz =
-                std::max(0.0, desired_center_hz + value_hz);
-            const uint64_t new_center_freq =
-                static_cast<uint64_t>(std::llround(tuned_center_hz));
-            if (new_center_freq == alloc_params.center_freq) {
-                return;
-            }
-
-            alloc_params.center_freq = new_center_freq;
-            device->stopRx();
-            if (!device->configure(alloc_params) || !device->startRx()) {
-                listeningActive = false;
-                if (listenToggleButton) {
-                    listenToggleButton->setText(tr("Старт прослушивания"));
+        if (!demodOffsetSpinBox) {
+            demodOffsetSpinBox = new QDoubleSpinBox(this);
+            demodOffsetSpinBox->setRange(-25000.0, 25000.0);
+            demodOffsetSpinBox->setValue(12000.0);
+            demodOffsetSpinBox->setSingleStep(100.0);
+            demodOffsetSpinBox->setDecimals(0);
+            demodOffsetSpinBox->setSuffix(QStringLiteral(" Hz"));
+            connect(demodOffsetSpinBox,
+                    static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+                    this, [this](double value_hz) {
+                if (!listeningActive || !device || !frequencySpinBox) {
+                    return;
                 }
-                if (audioTimer) {
-                    audioTimer->stop();
+
+                const double desired_center_hz = frequencySpinBox->value() * 1e6;
+                const double tuned_center_hz =
+                    std::max(0.0, desired_center_hz + value_hz);
+                const uint64_t new_center_freq =
+                    static_cast<uint64_t>(std::llround(tuned_center_hz));
+                if (new_center_freq == alloc_params.center_freq) {
+                    return;
                 }
-                updateListeningParameterControls();
+
+                alloc_params.center_freq = new_center_freq;
+                device->stopRx();
+                if (!device->configure(alloc_params) || !device->startRx()) {
+                    listeningActive = false;
+                    if (listenToggleButton) {
+                        listenToggleButton->setText(tr("Старт прослушивания"));
+                    }
+                    if (audioTimer) {
+                        audioTimer->stop();
+                    }
+                    updateListeningParameterControls();
+                    updateListeningStatus();
+                    QMessageBox::critical(this, tr("Ошибка"),
+                                          tr("Не удалось применить offset tuning."));
+                    return;
+                }
+
+                setupPlot();
+                updateDspMetricsInfo();
                 updateListeningStatus();
-                QMessageBox::critical(this, tr("Ошибка"),
-                                      tr("Не удалось применить offset tuning."));
-                return;
-            }
-
-            setupPlot();
-            updateDspMetricsInfo();
-            updateListeningStatus();
-        });
+            });
+        }
+        listeningInfoLayout->addWidget(
+            new QLabel(tr("Уход от нуля (IF offset):"), this));
+        listeningInfoLayout->addWidget(demodOffsetSpinBox);
+        listeningInfoLayout->addStretch();
+        listeningInfoGroup_->setLayout(listeningInfoLayout);
     }
-    listeningInfoLayout->addWidget(
-        new QLabel(tr("Уход от нуля (IF offset):"), this));
-    listeningInfoLayout->addWidget(demodOffsetSpinBox);
-
-    listeningInfoLayout->addStretch();
-    listeningInfoGroup->setLayout(listeningInfoLayout);
-    listeningInfoGroup->setFixedWidth(300);
 
     if (!detectedFrequenciesGroup) {
         detectedFrequenciesGroup = new QGroupBox(tr("Задетектированные частоты"), this);
@@ -345,8 +494,11 @@ void MainWindow::setupLayout() {
     }
 
     QVBoxLayout *configColumnLayout = new QVBoxLayout;
-    configColumnLayout->addWidget(listeningInfoGroup);
-    configColumnLayout->addWidget(controls);
+    configColumnLayout->addWidget(new QLabel(tr("Центральная частота:"), this));
+    configColumnLayout->addWidget(frequencySpinBox);
+    configColumnLayout->addWidget(analysisControlsGroup_);
+    configColumnLayout->addWidget(detectionControlsGroup_);
+    configColumnLayout->addWidget(listeningInfoGroup_);
     configColumnLayout->addWidget(info);
     configColumnLayout->addStretch();
 
@@ -375,8 +527,125 @@ void MainWindow::setupLayout() {
 
     centralWidget->setLayout(mainLayout);
 
+    updateModeControls();
     updateListeningParameterControls();
     updateListeningStatus();
+}
+
+void MainWindow::setAppMode(AppMode mode) {
+    if (appMode_ == mode) {
+        return;
+    }
+
+    if (listeningActive) {
+        stopListeningInternal();
+    }
+
+    appMode_ = mode;
+
+    if (mode == AppMode::Detection) {
+        frequencySpinBox->setValue(DETECTION_DEFAULT_FREQ_MHZ);
+    } else {
+        frequencySpinBox->setValue(ANALYSIS_DEFAULT_FREQ_MHZ);
+    }
+
+    if (analysisModeAction_) {
+        const QSignalBlocker blocker(analysisModeAction_);
+        analysisModeAction_->setChecked(mode == AppMode::Analysis);
+    }
+    if (detectionModeAction_) {
+        const QSignalBlocker blocker(detectionModeAction_);
+        detectionModeAction_->setChecked(mode == AppMode::Detection);
+    }
+
+    updateModeControls();
+
+    if (scanActiveTimer) {
+        if (mode == AppMode::Detection) {
+            scanActiveTimer->start(500);
+        } else {
+            scanActiveTimer->stop();
+            detectedFrequencies.clear();
+            updateDetectedFrequenciesList();
+        }
+    }
+    if (averagePowerLevelTimer) {
+        if (mode == AppMode::Detection) {
+            averagePowerLevelTimer->start(100);
+        } else {
+            averagePowerLevelTimer->stop();
+        }
+    }
+
+    applyConfig();
+    setupPlot();
+}
+
+void MainWindow::updateModeControls() {
+    const bool analysis = appMode_ == AppMode::Analysis;
+
+    if (analysisControlsGroup_) {
+        analysisControlsGroup_->setVisible(analysis);
+    }
+    if (detectionControlsGroup_) {
+        detectionControlsGroup_->setVisible(!analysis);
+    }
+    if (listeningInfoGroup_) {
+        listeningInfoGroup_->setVisible(!analysis);
+    }
+    if (detectedFrequenciesGroup) {
+        detectedFrequenciesGroup->setVisible(!analysis);
+    }
+
+    if (frequencySpinBox) {
+        if (analysis) {
+            frequencySpinBox->setRange(ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
+        } else {
+            frequencySpinBox->setRange(DETECTION_MIN_FREQ_MHZ, DETECTION_MAX_FREQ_MHZ);
+        }
+        frequencySpinBox->setDecimals(3);
+        frequencySpinBox->setSingleStep(0.001);
+    }
+
+    if (averagePowerRow_) {
+        averagePowerRow_->setVisible(!analysis);
+    }
+    if (detectionToleranceRow_) {
+        detectionToleranceRow_->setVisible(!analysis);
+    }
+    if (segmentsInfoRow_) {
+        segmentsInfoRow_->setVisible(analysis);
+    }
+    if (totalBinsInfoRow_) {
+        totalBinsInfoRow_->setVisible(analysis);
+    }
+    if (analysisHintRow_) {
+        analysisHintRow_->setVisible(analysis);
+    }
+
+    if (analysis) {
+        updateAnalysisSpanRange();
+    }
+
+    updateDspMetricsInfo();
+    updateListeningParameterControls();
+}
+
+void MainWindow::updateAnalysisSpanRange() {
+    if (!analysisSpanSpinBox_ || !frequencySpinBox ||
+        appMode_ != AppMode::Analysis) {
+        return;
+    }
+
+    const double max_span = maxAnalysisSpanMHz(frequencySpinBox->value());
+    analysisSpanSpinBox_->setMaximum(max_span);
+    if (analysisSpanSpinBox_->value() > max_span) {
+        analysisSpanSpinBox_->setValue(max_span);
+    }
+    if (analysisSpanSpinBox_->value() < ANALYSIS_MIN_SPAN_MHZ) {
+        analysisSpanSpinBox_->setValue(ANALYSIS_MIN_SPAN_MHZ);
+    }
+    updateDspMetricsInfo();
 }
 
 void MainWindow::updateDisplayModeControls() {
@@ -393,12 +662,22 @@ void MainWindow::updateDisplayModeControls() {
 
 void MainWindow::updateListeningParameterControls() {
     bool enabled = !listeningActive;
-    if (frequencySpinBox)
+    if (frequencySpinBox) {
         frequencySpinBox->setEnabled(enabled);
-    if (sampleRateSpinBox)
+    }
+    if (analysisSpanSpinBox_) {
+        analysisSpanSpinBox_->setEnabled(enabled);
+    }
+    if (analysisFftBox_) {
+        analysisFftBox_->setEnabled(enabled);
+    }
+    if (sampleRateSpinBox) {
         sampleRateSpinBox->setEnabled(enabled);
-    if (bandwidthSpinBox)
+    }
+    if (bandwidthSpinBox) {
         bandwidthSpinBox->setEnabled(enabled);
-    if (applyButton)
+    }
+    if (applyButton) {
         applyButton->setEnabled(enabled);
+    }
 }

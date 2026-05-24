@@ -1,4 +1,6 @@
 #include "MainWindow.hpp"
+#include "AnalysisParams.hpp"
+#include "MainWindowConstants.hpp"
 #include "AudioProcessorThread.hpp"
 #include "LogSink.hpp"
 #include "SpectrumWorker.hpp"
@@ -21,6 +23,31 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 
+namespace {
+
+hackrf_alloc_params allocFromSweepPlan(const AnalysisSweepPlan &plan) {
+    hackrf_alloc_params params;
+    if (plan.segments.empty()) {
+        return params;
+    }
+    const auto &seg = plan.segments.front();
+    params.center_freq = seg.center_freq_hz;
+    params.sample_rate = seg.sample_rate_hz;
+    params.bandwidth = seg.bandwidth_hz;
+    params.vga_gain = ANALYSIS_DEFAULT_VGA_GAIN;
+    params.lna_gain = ANALYSIS_DEFAULT_LNA_GAIN;
+    params.fft_size = plan.fft_size_per_segment;
+    return params;
+}
+
+AnalysisSweepPlan defaultAnalysisSweepPlan() {
+    return computeAnalysisSweepPlan(ANALYSIS_DEFAULT_FREQ_MHZ,
+                                    ANALYSIS_DEFAULT_SPAN_MHZ,
+                                    ANALYSIS_DEFAULT_SWEEP_FFT_SIZE);
+}
+
+}  // namespace
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       centralWidget(new QWidget(this)),
@@ -29,10 +56,9 @@ MainWindow::MainWindow(QWidget *parent)
       averagePowerLevelTimer(new QTimer(this)),
       scanActiveTimer(new QTimer(this)),
       activeFreqCleanupTimer(new QTimer(this)),
-      alloc_params({static_cast<uint64_t>(405.125 * 1e6),
-                    static_cast<uint64_t>(4.8 * 1e6),
-                    static_cast<uint32_t>(2.0 * 1e6), 20, 24, 1024}),
-      fftSize(1024),
+      analysisSweepPlan_(defaultAnalysisSweepPlan()),
+      alloc_params(allocFromSweepPlan(defaultAnalysisSweepPlan())),
+      fftSize(defaultAnalysisSweepPlan().total_bins),
       average_power(0.0),
       threshold(0),
       listenToggleButton(nullptr),
@@ -48,64 +74,13 @@ MainWindow::MainWindow(QWidget *parent)
 
     configure();
 
-    this->setWindowTitle("Radio Scanner");
-    controls = new QGroupBox(tr("HackRF Configuration"));
+    this->setWindowTitle("Radio Analyser");
     info = new QGroupBox(tr("Info"));
     setupControls();
     setupInfo();
-
-    QVBoxLayout *controlLayout = new QVBoxLayout;
-    controlLayout->addWidget(
-        new QLabel(tr("Center Frequency (MHz):")));
-    controlLayout->addWidget(frequencySpinBox);
-
-    controlLayout->addWidget(
-        new QLabel(tr("Sample Rate (MS/s):")));
-    controlLayout->addWidget(sampleRateSpinBox);
-
-    controlLayout->addWidget(
-        new QLabel(tr("Bandwidth (MHz):")));
-    controlLayout->addWidget(bandwidthSpinBox);
-
-    QHBoxLayout *vgaLayout = new QHBoxLayout;
-    vgaLayout->addWidget(vgaSlider);
-    vgaLayout->addWidget(vgaLabel);
-    controlLayout->addWidget(new QLabel(tr("VGA Gain:")));
-    controlLayout->addLayout(vgaLayout);
-
-    QHBoxLayout *lnaLayout = new QHBoxLayout;
-    lnaLayout->addWidget(lnaSlider);
-    lnaLayout->addWidget(lnaLabel);
-    controlLayout->addWidget(new QLabel(tr("LNA Gain:")));
-    controlLayout->addLayout(lnaLayout);
-
-    QHBoxLayout *fftLayout = new QHBoxLayout;
-    fftLayout->addWidget(fftSizeBox);
-    fftLayout->addWidget(fftSizeLabel);
-    controlLayout->addWidget(new QLabel(tr("FFT Size:")));
-    controlLayout->addLayout(fftLayout);
-
-    QHBoxLayout *thresholdLayout = new QHBoxLayout;
-    thresholdLayout->addWidget(thresholdSlider);
-    thresholdLayout->addWidget(thresholdLabel);
-    controlLayout->addWidget(new QLabel(tr("Threshold:")));
-    controlLayout->addLayout(thresholdLayout);
-
-    controlLayout->addWidget(applyButton);
-    controlLayout->addStretch();
-    controls->setLayout(controlLayout);
-    controls->setFixedWidth(300);
-
-    QVBoxLayout *infoLayout = new QVBoxLayout;
-    infoLayout->addWidget(new QLabel(tr("Average Power (dBFS):")));
-    infoLayout->addWidget(averagePowerLabel);
-    infoLayout->addWidget(new QLabel(tr("RBW (Hz/bin):")));
-    infoLayout->addWidget(rbwLabel);
-    infoLayout->addWidget(new QLabel(tr("Detection Tolerance (kHz):")));
-    infoLayout->addWidget(detectionToleranceLabel);
-    infoLayout->addStretch();
-    info->setLayout(infoLayout);
-    info->setFixedWidth(300);
+    rebuildAnalysisSweepPlan();
+    alloc_params = allocFromSweepPlan(analysisSweepPlan_);
+    fftSize = analysisSweepPlan_.total_bins;
 
 #ifdef HAVE_QT_AUDIO
     QAudioFormat format;
@@ -183,6 +158,8 @@ MainWindow::MainWindow(QWidget *parent)
     qRegisterMetaType<std::vector<double>>("std::vector<double>");
     spectrumWorker_ = new SpectrumWorker(this);
     spectrumWorker_->setDevice(device.get());
+    spectrumWorker_->setSweepPlan(analysisSweepPlan_);
+    spectrumWorker_->setSweepEnabled(true);
     spectrumThread_ = new QThread(this);
     spectrumWorker_->moveToThread(spectrumThread_);
     connect(spectrumWorker_, &SpectrumWorker::spectrumReady,
@@ -191,12 +168,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(spectrumUpdateTimer, &QTimer::timeout, this,
             &MainWindow::updateSpectrum);
-    spectrumUpdateTimer->start(50);
+    spectrumUpdateTimer->start(spectrumRefreshIntervalMs());
     connect(averagePowerLevelTimer, &QTimer::timeout, this,
             &MainWindow::updateAveragePower);
-    averagePowerLevelTimer->start(100);
     connect(scanActiveTimer, &QTimer::timeout, this, &MainWindow::scanActive);
-    scanActiveTimer->start(500);
 }
 
 MainWindow::~MainWindow() {
@@ -247,64 +222,67 @@ void MainWindow::refreshSpectrumPlot() {
         return;
     }
 
-    static double last_sample_rate = 0.0;
-    static uint64_t last_center_freq = 0;
+    static double last_display_span_mhz = 0.0;
+    static double last_display_center_mhz = 0.0;
     static int last_fft_size = 0;
 
-    double freq_resolution_hz = getRbwHz();
-    double start_freq_hz =
-        (alloc_params.center_freq - alloc_params.sample_rate / 2.0);
-    double end_freq_hz =
-        (alloc_params.center_freq + alloc_params.sample_rate / 2.0);
-    double freq_resolution_mhz = freq_resolution_hz / 1e6;
-    double start_freq_mhz = start_freq_hz / 1e6;
-    double end_freq_mhz = end_freq_hz / 1e6;
+    double display_center_mhz =
+        frequencySpinBox ? frequencySpinBox->value()
+                         : analysisSweepPlan_.center_freq_mhz;
+    double display_span_mhz = analysisSweepPlan_.requested_span_mhz;
+    if (appMode_ == AppMode::Detection) {
+        display_center_mhz = alloc_params.center_freq / 1e6;
+        display_span_mhz = alloc_params.sample_rate / 1e6;
+    }
 
-    if (alloc_params.sample_rate != last_sample_rate ||
-        alloc_params.center_freq != last_center_freq ||
+    const double start_freq_mhz = display_center_mhz - display_span_mhz / 2.0;
+    const double end_freq_mhz = display_center_mhz + display_span_mhz / 2.0;
+    const double freq_resolution_mhz =
+        display_span_mhz / static_cast<double>(std::max(1, fftSize));
+
+    if (display_span_mhz != last_display_span_mhz ||
+        display_center_mhz != last_display_center_mhz ||
         fftSize != last_fft_size) {
         waterfallHistory.clear();
+        waterfallGridInitialized_ = false;
 
         x_axis_values.resize(fftSize);
+        plot_x_cache_.resize(fftSize);
         for (int i = 0; i < fftSize; ++i) {
             x_axis_values[i] = start_freq_mhz + (i * freq_resolution_mhz);
+            plot_x_cache_[i] = x_axis_values[i];
         }
 
         plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
 
-        last_sample_rate = alloc_params.sample_rate;
-        last_center_freq = alloc_params.center_freq;
+        last_display_span_mhz = display_span_mhz;
+        last_display_center_mhz = display_center_mhz;
         last_fft_size = fftSize;
         updateDspMetricsInfo();
     }
 
+    const int wf_bins = waterfallDisplayBins();
+
     if (currentPlotMode == PlotMode::Spectrum) {
-        if (plot->graphCount() < 2) {
+        if (plot->graphCount() < 1) {
             setupPlot();
             return;
         }
 
-        QVector<double> x(fftSize), y(fftSize), y2(fftSize);
+        QVector<double> y(fftSize);
         for (int i = 0; i < fftSize; ++i) {
-            x[i] = x_axis_values[i];
             y[i] = spectrum_db[i];
-            y2[i] = average_power + threshold; 
         }
 
-        plot->graph(0)->setData(x, y);
-        plot->graph(1)->setData(x, y2);
-        plot->replot();
+        plot->graph(0)->setData(plot_x_cache_, y, true);
+        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
+            QVector<double> y2(fftSize);
+            const double threshold_line = average_power + threshold;
+            y2.fill(threshold_line);
+            plot->graph(1)->setData(plot_x_cache_, y2, true);
+        }
+        plot->replot(QCustomPlot::rpQueuedReplot);
     } else {
-        QVector<double> line(fftSize);
-        for (int i = 0; i < fftSize; ++i) {
-            line[i] = spectrum_db[i];
-        }
-
-        waterfallHistory.push_back(std::move(line));
-        if (static_cast<int>(waterfallHistory.size()) > waterfallHistorySize) {
-            waterfallHistory.pop_front();
-        }
-
         if (!waterfallMap) {
             setupPlot();
             return;
@@ -312,26 +290,34 @@ void MainWindow::refreshSpectrumPlot() {
 
         if (waterfallMap && waterfallMap->data()) {
             QCPColorMapData *data = waterfallMap->data();
-            data->setSize(fftSize, waterfallHistorySize);
-            data->setKeyRange(QCPRange(start_freq_mhz, end_freq_mhz));
-            data->setValueRange(QCPRange(0, waterfallHistorySize));
-
-            const int rows = static_cast<int>(waterfallHistory.size());
-            constexpr double emptyCellDb = -200.0;
-            for (int j = 0; j < waterfallHistorySize; ++j) {
-                int srcIndex = rows - 1 - j;
-                const QVector<double> *rowPtr =
-                    (srcIndex >= 0 && srcIndex < rows)
-                        ? &waterfallHistory[static_cast<size_t>(srcIndex)]
-                        : nullptr;
-                for (int i = 0; i < fftSize; ++i) {
-                    const bool hasRow = rowPtr && i < rowPtr->size();
-                    const double v = hasRow ? (*rowPtr)[i] : emptyCellDb;
-                    data->setCell(i, j, v);
+            if (!waterfallGridInitialized_ ||
+                data->keySize() != wf_bins ||
+                data->valueSize() != waterfallHistorySize) {
+                data->setSize(wf_bins, waterfallHistorySize);
+                data->setKeyRange(QCPRange(start_freq_mhz, end_freq_mhz));
+                data->setValueRange(QCPRange(0, waterfallHistorySize));
+                constexpr double emptyCellDb = -200.0;
+                for (int j = 0; j < waterfallHistorySize; ++j) {
+                    for (int i = 0; i < wf_bins; ++i) {
+                        data->setCell(i, j, emptyCellDb);
+                    }
                 }
+                waterfallWriteRow_ = 0;
+                waterfallGridInitialized_ = true;
             }
 
-            plot->replot();
+            const double step =
+                static_cast<double>(fftSize) / static_cast<double>(wf_bins);
+            for (int i = 0; i < wf_bins; ++i) {
+                const int src =
+                    std::min(fftSize - 1, static_cast<int>(i * step));
+                data->setCell(
+                    i, waterfallWriteRow_,
+                    spectrum_db[static_cast<size_t>(src)]);
+            }
+            waterfallWriteRow_ = (waterfallWriteRow_ + 1) % waterfallHistorySize;
+
+            plot->replot(QCustomPlot::rpQueuedReplot);
         }
     }
 }
@@ -339,6 +325,30 @@ void MainWindow::refreshSpectrumPlot() {
 void MainWindow::applyConfig() {
     if (!device) {
         QMessageBox::warning(this, "Error", "Device is not initialized.");
+        return;
+    }
+
+    if (appMode_ == AppMode::Analysis) {
+        rebuildAnalysisSweepPlan();
+        fftSize = analysisSweepPlan_.total_bins;
+        if (spectrumWorker_) {
+            spectrumWorker_->setSweepPlan(analysisSweepPlan_);
+            spectrumWorker_->setSweepEnabled(true);
+        }
+
+        windowed_samples.clear();
+        const double freq_res_hz = getRbwHz();
+        const int bins_per_channel = std::max(
+            1, static_cast<int>(std::round(DETECTOR_CHANNEL_WIDTH_HZ / freq_res_hz)));
+        windowed_samples.resize(bins_per_channel);
+        waterfallHistory.clear();
+        waterfallGridInitialized_ = false;
+        setupPlot();
+        updateDspMetricsInfo();
+        logBaselineMetrics("applyConfig");
+        updateSpectrumRefreshInterval();
+        spdlog::info("Analysis sweep plan applied ({} segments, {} bins).",
+                     analysisSweepPlan_.num_segments, fftSize);
         return;
     }
 
@@ -353,25 +363,35 @@ void MainWindow::applyConfig() {
     fftSize = fftSizeBox->currentData().toInt();
     alloc_params.fft_size = fftSize;
     fftSizeLabel->setText(QString::number(fftSize));
+    if (spectrumWorker_) {
+        spectrumWorker_->setSweepEnabled(false);
+    }
+
     windowed_samples.clear();
     const double freq_res_hz = getRbwHz();
     const int bins_per_channel = std::max(
         1, static_cast<int>(std::round(DETECTOR_CHANNEL_WIDTH_HZ / freq_res_hz)));
     windowed_samples.resize(bins_per_channel);
     waterfallHistory.clear();
+    waterfallGridInitialized_ = false;
     device->stopRx();
     bool success = device->configure(alloc_params);
 
     if (success) {
-        detectedFrequencies.clear();
-        updateDetectedFrequenciesList();
+        if (appMode_ == AppMode::Detection) {
+            detectedFrequencies.clear();
+            updateDetectedFrequenciesList();
+        }
         setupPlot();
         updateDspMetricsInfo();
         logBaselineMetrics("applyConfig");
         device->startRx();
+        updateSpectrumRefreshInterval();
         spdlog::info("Configuration applied successfully.");
-        QMessageBox::information(this, "Success",
-                                 "Configuration applied successfully.");
+        if (appMode_ == AppMode::Detection) {
+            QMessageBox::information(this, "Success",
+                                     "Configuration applied successfully.");
+        }
     } else {
         spdlog::error("Failed to apply new configuration.");
         QMessageBox::critical(this, "Error",
@@ -400,9 +420,52 @@ void MainWindow::toggleDisplayMode() {
                           : PlotMode::Spectrum;
 
     waterfallHistory.clear();
+    waterfallGridInitialized_ = false;
 
     updateDisplayModeControls();
     setupPlot();
+}
+
+int MainWindow::spectrumRefreshIntervalMs() const {
+    if (appMode_ == AppMode::Analysis) {
+        const int segments = std::max(1, analysisSweepPlan_.num_segments);
+        return std::min(500, 50 * segments);
+    }
+
+    const double sr = alloc_params.sample_rate;
+    if (sr >= 15.0e6) {
+        return 150;
+    }
+    if (sr >= 8.0e6) {
+        return 100;
+    }
+    return 50;
+}
+
+int MainWindow::waterfallDisplayBins() const {
+    if (appMode_ == AppMode::Analysis &&
+        fftSize > ANALYSIS_WATERFALL_MAX_BINS) {
+        return ANALYSIS_WATERFALL_MAX_BINS;
+    }
+    return fftSize;
+}
+
+void MainWindow::rebuildAnalysisSweepPlan() {
+    const int fft_per_segment =
+        analysisFftBox_ ? analysisFftBox_->currentData().toInt()
+                        : ANALYSIS_DEFAULT_SWEEP_FFT_SIZE;
+    analysisSweepPlan_ = computeAnalysisSweepPlan(
+        frequencySpinBox ? frequencySpinBox->value() : ANALYSIS_DEFAULT_FREQ_MHZ,
+        analysisSpanSpinBox_ ? analysisSpanSpinBox_->value()
+                             : ANALYSIS_DEFAULT_SPAN_MHZ,
+        fft_per_segment);
+}
+
+void MainWindow::updateSpectrumRefreshInterval() {
+    if (!spectrumUpdateTimer) {
+        return;
+    }
+    spectrumUpdateTimer->setInterval(spectrumRefreshIntervalMs());
 }
 
 void MainWindow::applyTheme(bool dark) {
@@ -456,7 +519,9 @@ void MainWindow::updatePlotTheme(bool dark) {
         plot->yAxis->setTickLabelColor(Qt::white);
         plot->yAxis->setLabelColor(Qt::white);
         if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(QColor(100, 180, 255)));
-        if (plot->graphCount() >= 2) plot->graph(1)->setPen(QPen(QColor(255, 100, 100), 3, Qt::DashLine));
+        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
+            plot->graph(1)->setPen(QPen(QColor(255, 100, 100), 3, Qt::DashLine));
+        }
     } else {
         plot->setBackground(QBrush(Qt::white));
         plot->xAxis->setBasePen(QPen(Qt::black));
@@ -470,12 +535,17 @@ void MainWindow::updatePlotTheme(bool dark) {
         plot->yAxis->setTickLabelColor(Qt::black);
         plot->yAxis->setLabelColor(Qt::black);
         if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(Qt::blue));
-        if (plot->graphCount() >= 2) plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
+        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
+            plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
+        }
     }
     plot->replot();
 }
 
 void MainWindow::scanActive() {
+    if (appMode_ != AppMode::Detection) {
+        return;
+    }
     if (!device || spectrum_db.empty() || x_axis_values.size() != spectrum_db.size()) {
         return;
     }
@@ -667,6 +737,9 @@ void MainWindow::setupVolumeSliderConnection() {
 }
 
 double MainWindow::getRbwHz() const {
+    if (appMode_ == AppMode::Analysis && analysisSweepPlan_.total_bins > 0) {
+        return analysisSweepPlan_.rbw_hz;
+    }
     if (fftSize <= 0) {
         return 1.0;
     }
@@ -706,14 +779,59 @@ double MainWindow::estimateSubBinFrequencyMHz(int bin) const {
 }
 
 void MainWindow::updateDspMetricsInfo() {
-    if (!rbwLabel || !detectionToleranceLabel) {
+    if (!rbwLabel) {
         return;
     }
+
     const double rbw = getRbwHz();
-    const double tol_mhz = getDetectionToleranceMHz();
     rbwLabel->setText(QString("%1").arg(rbw, 0, 'f', 1));
-    detectionToleranceLabel->setText(QString("%1")
-                                         .arg(tol_mhz * 1e3, 0, 'f', 2));
+
+    if (appMode_ == AppMode::Analysis) {
+        if (segmentsInfoLabel_) {
+            segmentsInfoLabel_->setText(QString::number(analysisSweepPlan_.num_segments));
+        }
+        if (totalBinsInfoLabel_) {
+            totalBinsInfoLabel_->setText(
+                QString("%1 / %2")
+                    .arg(analysisSweepPlan_.fft_size_per_segment)
+                    .arg(analysisSweepPlan_.total_bins));
+        }
+        if (analysisHintLabel_ && analysisSpanSpinBox_ && frequencySpinBox) {
+            const double center = frequencySpinBox->value();
+            const double max_span = maxAnalysisSpanMHz(center);
+            const int segments = analysisSweepPlan_.num_segments;
+            const int est_ms =
+                segments * (ANALYSIS_SWEEP_SETTLE_MS + 20);
+
+            QStringList hints;
+            hints << tr("Полоса собирается из %1 захватов по %2 MHz.")
+                         .arg(segments)
+                         .arg(ANALYSIS_SWEEP_SEGMENT_MHZ, 0, 'f', 1);
+            hints << tr("Оценка времени sweep: ~%1 ms.").arg(est_ms);
+            if (analysisSweepPlan_.segments_clamped) {
+                hints << tr("Достигнут лимит %1 сегментов.")
+                           .arg(ANALYSIS_MAX_SWEEP_SEGMENTS);
+            }
+            if (max_span < static_cast<double>(ANALYSIS_MAX_SWEEP_SEGMENTS) *
+                               ANALYSIS_SWEEP_SEGMENT_MHZ - 1e-6) {
+                hints << tr("При частоте %1 MHz макс. полоса: %2 MHz.")
+                           .arg(center, 0, 'f', 3)
+                           .arg(max_span, 0, 'f', 3);
+            }
+            if (fftSize > ANALYSIS_WATERFALL_MAX_BINS) {
+                hints << tr("Waterfall: %1 bins (downsample).")
+                           .arg(ANALYSIS_WATERFALL_MAX_BINS);
+            }
+            analysisHintLabel_->setText(hints.join('\n'));
+        }
+        return;
+    }
+
+    if (detectionToleranceLabel) {
+        const double tol_mhz = getDetectionToleranceMHz();
+        detectionToleranceLabel->setText(
+            QString("%1").arg(tol_mhz * 1e3, 0, 'f', 2));
+    }
 }
 
 void MainWindow::logBaselineMetrics(const char *context) const {

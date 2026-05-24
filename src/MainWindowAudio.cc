@@ -13,7 +13,37 @@
 #include <QMessageBox>
 #include <spdlog/spdlog.h>
 
+void MainWindow::stopListeningInternal() {
+#ifdef HAVE_QT_AUDIO
+    listeningActive = false;
+    if (listenToggleButton) {
+        listenToggleButton->setText(tr("Старт прослушивания"));
+    }
+    if (audioTimer) {
+        audioTimer->stop();
+    }
+    if (audioSink) {
+        audioSink->stop();
+        audioIODevice = nullptr;
+    }
+    audioBuffer.clear();
+    if (audioProcessorThread) {
+        audioProcessorThread->resetDSPState();
+        audioProcessorThread->clearPendingQueue();
+    }
+    updateListeningParameterControls();
+    updateListeningStatus();
+#endif
+}
+
 void MainWindow::toggleListening() {
+    if (appMode_ != AppMode::Detection) {
+        QMessageBox::warning(this, tr("Ошибка"),
+                             tr("Прослушивание доступно только в режиме "
+                                "детектирования."));
+        return;
+    }
+
     if (!device) {
         QMessageBox::warning(this, tr("Ошибка"),
                              tr("Устройство не инициализировано."));
@@ -37,6 +67,8 @@ void MainWindow::toggleListening() {
             static_cast<uint32_t>(bandwidthSpinBox->value() * 1e6);
         alloc_params.vga_gain = vgaSlider->value();
         alloc_params.lna_gain = lnaSlider->value();
+        fftSize = fftSizeBox->currentData().toInt();
+        alloc_params.fft_size = fftSize;
 
         device->stopRx();
         if (!device->configure(alloc_params) || !device->startRx()) {
@@ -92,22 +124,7 @@ void MainWindow::toggleListening() {
         return;
 #endif
     } else {
-        listeningActive = false;
-        if (listenToggleButton)
-            listenToggleButton->setText(tr("Старт прослушивания"));
-        if (audioTimer)
-            audioTimer->stop();
-#ifdef HAVE_QT_AUDIO
-        if (audioSink) {
-            audioSink->stop();
-            audioIODevice = nullptr;
-        }
-        audioBuffer.clear();
-        if (audioProcessorThread) {
-            audioProcessorThread->resetDSPState();
-            audioProcessorThread->clearPendingQueue();
-        }
-#endif
+        stopListeningInternal();
     }
 
     updateListeningParameterControls();
