@@ -210,6 +210,7 @@ void MainWindow::updateSpectrum() {
 void MainWindow::onSpectrumReady(std::vector<double> result) {
     spectrum_db = std::move(result);
     refreshSpectrumPlot();
+    updateDspMetricsInfo();
 }
 
 void MainWindow::updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq_samples) {
@@ -864,6 +865,24 @@ void MainWindow::updateDspMetricsInfo() {
             if (fftSize > ANALYSIS_WATERFALL_MAX_BINS) {
                 hints << tr("Waterfall: %1 bins (downsample).")
                            .arg(ANALYSIS_WATERFALL_MAX_BINS);
+            }
+            if (isFpgaFftSelected() && device) {
+                switch (device->getLastSpectrumSource()) {
+                case FftSpectrumSource::Fpga:
+                    hints << tr("FFT источник: FPGA (данные с платы).");
+                    break;
+                case FftSpectrumSource::FpgaFailed: {
+                    const QString err =
+                        QString::fromStdString(device->getLastFftError());
+                    hints << tr("FFT источник: FPGA ошибка (%1).")
+                                 .arg(err.isEmpty() ? tr("нет данных")
+                                                    : err);
+                    break;
+                }
+                default:
+                    hints << tr("FFT источник: FPGA (ожидание первого кадра).");
+                    break;
+                }
             }
             analysisHintLabel_->setText(hints.join('\n'));
         }

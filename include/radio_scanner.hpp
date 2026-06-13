@@ -18,6 +18,12 @@ enum class FftBackend {
     FPGA
 };
 
+enum class FftSpectrumSource {
+    Fftw,
+    Fpga,
+    FpgaFailed
+};
+
 struct hackrf_alloc_params {
     uint64_t center_freq = 0;
     double sample_rate = 0;
@@ -44,10 +50,13 @@ public:
         bool remove_dc = true);
     std::vector<double> getMagnitudeSpectrum();
     std::vector<double> getMagnitudeSpectrumFromLatest(bool remove_dc = false);
+    std::vector<double> getMagnitudeSpectrumFromRawLatest(
+        std::vector<int8_t> raw_tail);
     std::vector<double> getMagnitudeSpectrumFromIQ(
         const std::vector<std::complex<float>> &iq_samples);
     void setFftBackend(FftBackend backend);
     FftBackend getFftBackend() const;
+    FftSpectrumSource getLastSpectrumSource() const;
     std::string getLastFftError() const;
 
     const hackrf_alloc_params& getCurrentAllocParams() const {
@@ -88,6 +97,7 @@ private:
     std::unique_ptr<FpgaFftProcessor> fpga_fft_;
     mutable std::mutex fft_backend_mutex_;
     std::string last_fft_error_;
+    FftSpectrumSource last_spectrum_source_ = FftSpectrumSource::Fftw;
 };
 
 #endif

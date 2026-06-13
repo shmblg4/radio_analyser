@@ -1,10 +1,12 @@
 #include "FpgaFftProcessor.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 #ifdef HAVE_FTDI_D2XX
@@ -13,6 +15,43 @@
 
 namespace {
 constexpr size_t kBytesPerFftBin = 2U * sizeof(int32_t);
+constexpr size_t kMinNonzeroRxBins = 32;
+constexpr unsigned kRxResponseTimeoutMs = 400;
+constexpr int kMaxTxAttempts = 4;
+constexpr unsigned kMaxStaleRxDiscards = 16;
+
+int32_t readLeI32(const uint8_t *p) {
+    const uint32_t v = static_cast<uint32_t>(p[0]) |
+                       (static_cast<uint32_t>(p[1]) << 8) |
+                       (static_cast<uint32_t>(p[2]) << 16) |
+                       (static_cast<uint32_t>(p[3]) << 24);
+    return static_cast<int32_t>(v);
+}
+
+struct RxFrameStats {
+    int64_t max_abs = 0;
+    int64_t nonzero_bins = 0;
+};
+
+RxFrameStats measureRxFrame(const uint8_t *rx_data, size_t bytes_read) {
+    RxFrameStats stats;
+    if (!rx_data || bytes_read < kBytesPerFftBin) {
+        return stats;
+    }
+    const size_t complete_bins = bytes_read / kBytesPerFftBin;
+    for (size_t bin = 0; bin < complete_bins; ++bin) {
+        const int32_t re = readLeI32(rx_data + bin * kBytesPerFftBin);
+        const int32_t im =
+            readLeI32(rx_data + bin * kBytesPerFftBin + sizeof(int32_t));
+        stats.max_abs = std::max(stats.max_abs,
+                                 static_cast<int64_t>(std::max(std::abs(re),
+                                                               std::abs(im))));
+        if (re != 0 || im != 0) {
+            ++stats.nonzero_bins;
+        }
+    }
+    return stats;
+}
 
 int8_t clampToInt8(float value) {
     const float scaled = std::round(value * 127.0f);
@@ -22,12 +61,11 @@ int8_t clampToInt8(float value) {
     return static_cast<int8_t>(clamped);
 }
 
-int32_t readLeI32(const uint8_t *p) {
-    const uint32_t v = static_cast<uint32_t>(p[0]) |
-                       (static_cast<uint32_t>(p[1]) << 8) |
-                       (static_cast<uint32_t>(p[2]) << 16) |
-                       (static_cast<uint32_t>(p[3]) << 24);
-    return static_cast<int32_t>(v);
+int8_t clampInt32ToInt8(int value) {
+    const int clamped = std::clamp(value,
+                                   static_cast<int>(std::numeric_limits<int8_t>::min()),
+                                   static_cast<int>(std::numeric_limits<int8_t>::max()));
+    return static_cast<int8_t>(clamped);
 }
 
 #ifdef HAVE_FTDI_D2XX
@@ -152,27 +190,215 @@ bool FpgaFftProcessor::process(
         return false;
     }
 
-    if (!ensureOpen(error)) {
+    const std::vector<uint8_t> tx = makeTxFrame(iq_samples, false);
+    return transferFrame(tx, spectrum_db, error);
+}
+
+bool FpgaFftProcessor::processFromRaw(const int8_t *raw_iq, size_t num_iq_pairs,
+                                      std::vector<double> &spectrum_db,
+                                      std::string &error) {
+    spectrum_db.clear();
+    if (!raw_iq || num_iq_pairs < static_cast<size_t>(kFftSize)) {
+        error = "FPGA FFT needs 1024 raw IQ pairs";
         return false;
     }
 
-    const std::vector<uint8_t> tx = makeTxFrame(iq_samples, false);
-    if (!writeAll(tx.data(), tx.size(), error)) {
-        close();
+    const std::vector<uint8_t> tx = makeTxFrameFromRaw(raw_iq, num_iq_pairs, false);
+    return transferFrame(tx, spectrum_db, error);
+}
+
+bool FpgaFftProcessor::transferFrame(const std::vector<uint8_t> &tx,
+                                     std::vector<double> &spectrum_db,
+                                     std::string &error) {
+    spectrum_db.clear();
+    if (tx.size() != kTxFrameBytes) {
+        error = "FPGA TX frame size mismatch";
+        return false;
+    }
+
+    if (!ensureOpen(error)) {
         return false;
     }
 
     std::vector<uint8_t> rx(kRxFrameBytes);
     size_t bytes_read = 0;
-    if (!readFrame(rx.data(), rx.size(), bytes_read, error)) {
-        if (bytes_read < kBytesPerFftBin) {
+    bool frame_valid = false;
+    std::string last_attempt_error;
+
+    for (int attempt = 0; attempt < kMaxTxAttempts && !frame_valid; ++attempt) {
+        bytes_read = 0;
+        last_attempt_error.clear();
+
+#ifdef HAVE_FTDI_D2XX
+        FT_Purge(static_cast<FT_HANDLE>(handle_), FT_PURGE_RX);
+        unsigned stale_discarded = 0;
+        if (!discardStaleRx(kMaxStaleRxDiscards, stale_discarded,
+                            last_attempt_error)) {
+            error = last_attempt_error;
+            return false;
+        }
+#endif
+
+        if (!writeAll(tx.data(), tx.size(), last_attempt_error)) {
+            error = last_attempt_error;
             close();
             return false;
         }
+
+        const auto tx_time = std::chrono::steady_clock::now();
+        unsigned early_discarded = 0;
+        long long post_tx_ms = 0;
+        unsigned rx_queued = 0;
+        if (!waitForFreshRxAfterTx(tx_time, kRxResponseTimeoutMs, rx_queued,
+                                   post_tx_ms, early_discarded,
+                                   last_attempt_error)) {
+            continue;
+        }
+
+        bytes_read = 0;
+        if (!readFrame(rx.data(), rx.size(), bytes_read, last_attempt_error) ||
+            bytes_read < kRxFrameBytes) {
+            continue;
+        }
+
+        const RxFrameStats stats = measureRxFrame(rx.data(), bytes_read);
+        const int64_t rx_nonzero_bins = stats.nonzero_bins;
+
+        if (rx_nonzero_bins < static_cast<int64_t>(kMinNonzeroRxBins)) {
+            last_attempt_error = "FPGA RX frame had too few nonzero bins (" +
+                                 std::to_string(rx_nonzero_bins) + ")";
+            continue;
+        }
+
+        std::vector<double> trial_spectrum =
+            rxFrameToSpectrumDb(rx.data(), bytes_read);
+        if (isCombGarbageSpectrum(trial_spectrum)) {
+            last_attempt_error =
+                "FPGA RX frame looked like stale comb noise";
+            continue;
+        }
+
+        spectrum_db = std::move(trial_spectrum);
+        frame_valid = true;
+        warmed_up_ = true;
     }
 
-    spectrum_db = rxFrameToSpectrumDb(rx.data(), bytes_read);
+    if (!frame_valid) {
+        error = last_attempt_error.empty()
+                    ? "FPGA RX frame was not valid"
+                    : last_attempt_error;
+        return false;
+    }
+
     return spectrum_db.size() == static_cast<size_t>(kFftSize);
+}
+
+bool FpgaFftProcessor::isCombGarbageSpectrum(
+    const std::vector<double> &spectrum_db) {
+    int hot = 0;
+    int max_bin = 0;
+    double max_db = -1e9;
+    double min_hot = 1e9;
+    double sum_hot = 0.0;
+    for (int i = 0; i < static_cast<int>(spectrum_db.size()); ++i) {
+        const double value = spectrum_db[static_cast<size_t>(i)];
+        if (value > max_db) {
+            max_db = value;
+            max_bin = i;
+        }
+        if (value > -28.0) {
+            ++hot;
+            min_hot = std::min(min_hot, value);
+            sum_hot += value;
+        }
+    }
+    if (hot < 80) {
+        return false;
+    }
+
+    const double avg_hot = sum_hot / static_cast<double>(hot);
+    const double spread = max_db - min_hot;
+    const double peak_above_avg = max_db - avg_hot;
+    if (spread < 8.0 && hot > 100) {
+        return true;
+    }
+    if (max_bin == 0 && hot > 120 && max_db > -35.0 && peak_above_avg < 6.0) {
+        return true;
+    }
+    return false;
+}
+
+bool FpgaFftProcessor::waitForFreshRxAfterTx(
+    const std::chrono::steady_clock::time_point &tx_time,
+    unsigned timeout_ms, unsigned &rx_queued, long long &post_tx_ms,
+    unsigned &early_discarded, std::string &error) {
+#ifdef HAVE_FTDI_D2XX
+    early_discarded = 0;
+    rx_queued = 0;
+    post_tx_ms = 0;
+    const auto deadline =
+        tx_time + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        post_tx_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - tx_time)
+                         .count();
+        DWORD queued = 0;
+        const FT_STATUS status =
+            FT_GetQueueStatus(static_cast<FT_HANDLE>(handle_), &queued);
+        if (status != FT_OK) {
+            error = "FTDI queue status failed: " + ftStatusName(status);
+            return false;
+        }
+        rx_queued = static_cast<unsigned>(queued);
+        if (queued >= static_cast<DWORD>(kRxFrameBytes)) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    error = "FTDI RX not ready: queued " + std::to_string(rx_queued) + "/" +
+            std::to_string(kRxFrameBytes) + " bytes";
+    return false;
+#else
+    (void)tx_time;
+    (void)timeout_ms;
+    rx_queued = 0;
+    post_tx_ms = 0;
+    early_discarded = 0;
+    error = "FTDI D2XX support is not compiled in";
+    return false;
+#endif
+}
+
+bool FpgaFftProcessor::discardStaleRx(unsigned max_frames, unsigned &discarded,
+                                      std::string &error) {
+#ifdef HAVE_FTDI_D2XX
+    discarded = 0;
+    std::vector<uint8_t> trash(kRxFrameBytes);
+    for (unsigned i = 0; i < max_frames; ++i) {
+        DWORD queued = 0;
+        const FT_STATUS status =
+            FT_GetQueueStatus(static_cast<FT_HANDLE>(handle_), &queued);
+        if (status != FT_OK) {
+            error = "FTDI queue status failed: " + ftStatusName(status);
+            return false;
+        }
+        if (queued < static_cast<DWORD>(kRxFrameBytes)) {
+            break;
+        }
+
+        size_t bytes_read = 0;
+        if (!readFrame(trash.data(), trash.size(), bytes_read, error)) {
+            return false;
+        }
+        ++discarded;
+    }
+    return true;
+#else
+    (void)max_frames;
+    discarded = 0;
+    error = "FTDI D2XX support is not compiled in";
+    return false;
+#endif
 }
 
 void FpgaFftProcessor::close() {
@@ -184,6 +410,7 @@ void FpgaFftProcessor::close() {
 #else
     handle_ = nullptr;
 #endif
+    warmed_up_ = false;
 }
 
 std::vector<uint8_t> FpgaFftProcessor::makeTxFrame(
@@ -206,6 +433,50 @@ std::vector<uint8_t> FpgaFftProcessor::makeTxFrame(
     return tx;
 }
 
+std::vector<uint8_t> FpgaFftProcessor::makeTxFrameFromRaw(const int8_t *raw_iq,
+                                                          size_t num_iq_pairs,
+                                                          bool invert_imag) {
+    std::vector<uint8_t> tx(kTxFrameBytes, 0);
+    if (!raw_iq || num_iq_pairs == 0) {
+        return tx;
+    }
+
+    const size_t start =
+        num_iq_pairs > static_cast<size_t>(kFftSize)
+            ? num_iq_pairs - static_cast<size_t>(kFftSize)
+            : 0;
+    const size_t count =
+        std::min(num_iq_pairs, static_cast<size_t>(kFftSize));
+
+    int max_abs = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const int8_t re = raw_iq[2 * (start + i)];
+        const int8_t im = raw_iq[2 * (start + i) + 1];
+        max_abs = std::max(max_abs, std::max(std::abs(static_cast<int>(re)),
+                                             std::abs(static_cast<int>(im))));
+    }
+
+    int gain = 1;
+    constexpr int kTargetTxPeak = 96;
+    constexpr int kMinTxPeakBeforeGain = 64;
+    constexpr int kMaxTxGain = 16;
+    if (max_abs > 0 && max_abs < kMinTxPeakBeforeGain) {
+        gain = std::min(kMaxTxGain, kTargetTxPeak / max_abs);
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const int8_t re = raw_iq[2 * (start + i)];
+        const int8_t im = raw_iq[2 * (start + i) + 1];
+        const int8_t scaled_re = clampInt32ToInt8(static_cast<int>(re) * gain);
+        const int8_t scaled_im =
+            clampInt32ToInt8(static_cast<int>(im) * gain);
+        tx[2 * i] = static_cast<uint8_t>(scaled_re);
+        tx[2 * i + 1] = static_cast<uint8_t>(
+            invert_imag ? static_cast<int8_t>(-scaled_im) : scaled_im);
+    }
+    return tx;
+}
+
 std::vector<double> FpgaFftProcessor::rxFrameToSpectrumDb(const uint8_t *rx_data,
                                                           size_t rx_size) {
     if (!rx_data || rx_size < kBytesPerFftBin) {
@@ -215,17 +486,18 @@ std::vector<double> FpgaFftProcessor::rxFrameToSpectrumDb(const uint8_t *rx_data
     std::vector<double> spectrum_db(static_cast<size_t>(kFftSize), -240.0);
     const size_t complete_bins =
         std::min(static_cast<size_t>(kFftSize), rx_size / kBytesPerFftBin);
+    const double fft_norm = static_cast<double>(kFftSize);
     for (size_t fpga_bin = 0; fpga_bin < complete_bins; ++fpga_bin) {
         const size_t offset = fpga_bin * kBytesPerFftBin;
         const int32_t re = readLeI32(rx_data + offset);
         const int32_t im = readLeI32(rx_data + offset + sizeof(int32_t));
-        const double re_d = static_cast<double>(re);
-        const double im_d = static_cast<double>(im);
-        const double power = re_d * re_d + im_d * im_d;
+        const double magnitude =
+            std::sqrt(static_cast<double>(re) * static_cast<double>(re) +
+                      static_cast<double>(im) * static_cast<double>(im));
         const int display_bin =
             correctedDisplayBinForFpgaBin(static_cast<int>(fpga_bin));
         spectrum_db[static_cast<size_t>(display_bin)] =
-            power > 0.0 ? 10.0 * std::log10(power) : -240.0;
+            20.0 * std::log10(magnitude / fft_norm + 1e-12);
     }
     return spectrum_db;
 }
@@ -271,6 +543,7 @@ bool FpgaFftProcessor::ensureOpen(std::string &error) {
     }
 
     handle_ = handle;
+    warmed_up_ = false;
     status = FT_ResetDevice(static_cast<FT_HANDLE>(handle_));
     if (status != FT_OK) {
         error = "FTDI reset failed: " + ftStatusName(status);
@@ -278,6 +551,7 @@ bool FpgaFftProcessor::ensureOpen(std::string &error) {
         return false;
     }
     FT_Purge(static_cast<FT_HANDLE>(handle_), FT_PURGE_RX | FT_PURGE_TX);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     status = FT_SetBitMode(static_cast<FT_HANDLE>(handle_), 0x00, 0x00);
     if (status != FT_OK) {
@@ -291,14 +565,14 @@ bool FpgaFftProcessor::ensureOpen(std::string &error) {
         close();
         return false;
     }
-    status = FT_SetFlowControl(static_cast<FT_HANDLE>(handle_),
-                               FT_FLOW_RTS_CTS, 0, 0);
+    status = FT_SetFlowControl(static_cast<FT_HANDLE>(handle_), FT_FLOW_RTS_CTS,
+                               0, 0);
     if (status != FT_OK) {
         error = "FTDI flow control setup failed: " + ftStatusName(status);
         close();
         return false;
     }
-    FT_SetTimeouts(static_cast<FT_HANDLE>(handle_), 500, 500);
+    FT_SetTimeouts(static_cast<FT_HANDLE>(handle_), kRxResponseTimeoutMs, 500);
     FT_SetLatencyTimer(static_cast<FT_HANDLE>(handle_), 2);
     FT_SetUSBParameters(static_cast<FT_HANDLE>(handle_), 65536, 65536);
     FT_Purge(static_cast<FT_HANDLE>(handle_), FT_PURGE_RX | FT_PURGE_TX);
@@ -306,6 +580,55 @@ bool FpgaFftProcessor::ensureOpen(std::string &error) {
 #else
     error = "FTDI D2XX support was not found at build time; install ftd2xx.h "
             "and libftd2xx.so, then reconfigure CMake";
+    return false;
+#endif
+}
+
+bool FpgaFftProcessor::waitForRxReady(size_t bytes_needed, unsigned timeout_ms,
+                                     unsigned &rx_queued, std::string &error) {
+#ifdef HAVE_FTDI_D2XX
+    rx_queued = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        DWORD queued = 0;
+        const FT_STATUS status =
+            FT_GetQueueStatus(static_cast<FT_HANDLE>(handle_), &queued);
+        if (status != FT_OK) {
+            error = "FTDI queue status failed: " + ftStatusName(status);
+            return false;
+        }
+        rx_queued = static_cast<unsigned>(queued);
+        if (bytes_needed == 0) {
+            if (queued == 0) {
+                return true;
+            }
+        } else if (queued >= static_cast<DWORD>(bytes_needed)) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (bytes_needed == 0) {
+        error = "FTDI RX queue did not drain";
+        return false;
+    }
+    if (bytes_needed > 1 &&
+        rx_queued + 1 >= static_cast<unsigned>(bytes_needed)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        DWORD queued = 0;
+        if (FT_GetQueueStatus(static_cast<FT_HANDLE>(handle_), &queued) == FT_OK) {
+            rx_queued = static_cast<unsigned>(queued);
+        }
+        return true;
+    }
+    error = "FTDI RX not ready: queued " + std::to_string(rx_queued) + "/" +
+            std::to_string(bytes_needed) + " bytes";
+    return false;
+#else
+    (void)bytes_needed;
+    (void)timeout_ms;
+    rx_queued = 0;
+    error = "FTDI D2XX support is not compiled in";
     return false;
 #endif
 }
@@ -339,7 +662,14 @@ bool FpgaFftProcessor::readFrame(uint8_t *data, size_t size,
                                  size_t &bytes_read, std::string &error) {
 #ifdef HAVE_FTDI_D2XX
     bytes_read = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kRxResponseTimeoutMs);
     while (bytes_read < size) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            error = "FTDI partial frame timeout: " + std::to_string(bytes_read) +
+                    "/" + std::to_string(size) + " bytes";
+            return false;
+        }
         DWORD chunk = 0;
         const DWORD want = static_cast<DWORD>(
             std::min<size_t>(size - bytes_read, 64U * 1024U));
@@ -353,9 +683,8 @@ bool FpgaFftProcessor::readFrame(uint8_t *data, size_t size,
             return false;
         }
         if (chunk == 0) {
-            error = "FTDI partial frame: " + std::to_string(bytes_read) + "/" +
-                    std::to_string(size) + " bytes";
-            return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
         }
         bytes_read += chunk;
     }

@@ -207,6 +207,25 @@ int main() {
         }
     }
 
+    {
+        std::vector<double> comb(1024, -240.0);
+        for (int i = 0; i < 320; ++i) {
+            comb[static_cast<size_t>(i)] = -22.875632;
+        }
+        if (!FpgaFftProcessor::isCombGarbageSpectrum(comb)) {
+            std::cerr << "FPGA comb garbage detector failed on flat comb\n";
+            return EXIT_FAILURE;
+        }
+
+        std::vector<double> tone(1024, -120.0);
+        tone[100] = -20.0;
+        tone[200] = -35.0;
+        if (FpgaFftProcessor::isCombGarbageSpectrum(tone)) {
+            std::cerr << "FPGA comb garbage detector rejected valid tone\n";
+            return EXIT_FAILURE;
+        }
+    }
+
     std::cout << "DSP self-test passed\n";
     return EXIT_SUCCESS;
 }
