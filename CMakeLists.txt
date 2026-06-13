@@ -110,7 +110,10 @@ target_compile_options(radio_analyser PRIVATE
 # Testing
 enable_testing()
 
-add_executable(dsp_self_test tests/dsp_self_test.cc)
-target_include_directories(dsp_self_test PRIVATE ${FFTW3_INCLUDE_DIRS})
+add_executable(dsp_self_test tests/dsp_self_test.cc src/AnalysisParams.cc)
+target_include_directories(dsp_self_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${FFTW3_INCLUDE_DIRS}
+)
 target_link_libraries(dsp_self_test PRIVATE ${FFTW3_LIBRARIES})
 add_test(NAME dsp_self_test COMMAND dsp_self_test)

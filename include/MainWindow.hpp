@@ -2,6 +2,7 @@
 #define MAINWINDOW_HPP
 
 #include "qcustomplot.h"
+#include "AnalysisParams.hpp"
 #include "radio_scanner.hpp"
 #include <QApplication>
 #include <QDebug>
@@ -57,10 +58,12 @@ private slots:
     void activeFreqCleanup();
 
 private:
+    enum class AppMode { Analysis, Detection };
     enum class PlotMode { Spectrum, Waterfall };
 
     QWidget *centralWidget;
 
+    AppMode appMode_ = AppMode::Analysis;
     PlotMode currentPlotMode = PlotMode::Spectrum;
 
     QCustomPlot *plot;
@@ -76,6 +79,10 @@ private:
     void updateListeningParameterControls();
     void setupVolumeSliderConnection();
     void updateDisplayModeControls();
+    void updateModeControls();
+    void updateAnalysisSpanRange();
+    void setAppMode(AppMode mode);
+    void stopListeningInternal();
     void updateDetectedFrequenciesList();
     void updatePlotTheme(bool dark);
     bool isNearExistingFrequency(double newFreq, double& existingFreq);
@@ -85,8 +92,14 @@ private:
     double estimateSubBinFrequencyMHz(int bin) const;
     void updateDspMetricsInfo();
     void logBaselineMetrics(const char *context) const;
+    void updateSpectrumRefreshInterval();
+    int spectrumRefreshIntervalMs() const;
+    int waterfallDisplayBins() const;
+    void rebuildAnalysisSweepPlan();
 
     std::unique_ptr<HackrfDevice> device;
+
+    AnalysisSweepPlan analysisSweepPlan_;
     
     QTimer *spectrumUpdateTimer;
     QTimer *averagePowerLevelTimer;
@@ -101,10 +114,13 @@ private:
     int scan_current_start_index;
 
     std::vector<double> x_axis_values;
+    QVector<double> plot_x_cache_;
     std::vector<double> spectrum_db;
     std::vector<double> windowed_samples;
     std::deque<QVector<double>> waterfallHistory;
     int waterfallHistorySize = 200;
+    int waterfallWriteRow_ = 0;
+    bool waterfallGridInitialized_ = false;
 
     std::vector<double> detectedFrequencies;
     static constexpr double MIN_FREQUENCY_TOLERANCE_MHZ = 0.010;
@@ -112,9 +128,12 @@ private:
     static constexpr double MERGE_WIDTH_CHANNEL_FACTOR = 1.0;
     static constexpr size_t MAX_DETECTED_FREQUENCIES = 10;
 
-    QGroupBox *controls;
+    QGroupBox *analysisControlsGroup_ = nullptr;
+    QGroupBox *detectionControlsGroup_ = nullptr;
     QWidget *controlsAndInfoWidget;
     QDoubleSpinBox *frequencySpinBox;
+    QDoubleSpinBox *analysisSpanSpinBox_ = nullptr;
+    QComboBox *analysisFftBox_ = nullptr;
     QDoubleSpinBox *sampleRateSpinBox;
     QDoubleSpinBox *bandwidthSpinBox;
     QSlider *vgaSlider;
@@ -141,12 +160,24 @@ private:
     QLabel *averagePowerLabel = nullptr;
     QLabel *rbwLabel = nullptr;
     QLabel *detectionToleranceLabel = nullptr;
+    QLabel *segmentsInfoLabel_ = nullptr;
+    QLabel *totalBinsInfoLabel_ = nullptr;
+    QLabel *analysisHintLabel_ = nullptr;
+    QWidget *averagePowerRow_ = nullptr;
+    QWidget *detectionToleranceRow_ = nullptr;
+    QWidget *segmentsInfoRow_ = nullptr;
+    QWidget *totalBinsInfoRow_ = nullptr;
+    QWidget *analysisHintRow_ = nullptr;
+
+    QGroupBox *listeningInfoGroup_ = nullptr;
 
     QGroupBox *logGroup = nullptr;
     QPlainTextEdit *logTextEdit = nullptr;
     static constexpr int maxLogLines = 1000;
 
     QAction *plotModeAction = nullptr;
+    QAction *analysisModeAction_ = nullptr;
+    QAction *detectionModeAction_ = nullptr;
     QToolBar *viewToolBar = nullptr;
     QAction *darkThemeAction = nullptr;
     QAction *lightThemeAction = nullptr;

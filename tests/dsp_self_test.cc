@@ -1,3 +1,6 @@
+#include "AnalysisParams.hpp"
+#include "MainWindowConstants.hpp"
+
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -94,6 +97,50 @@ int main() {
     if (std::abs(estimated - toneHz) > 300.0) {
         std::cerr << "Tone estimation check failed: expected " << toneHz
                   << " got " << estimated << "\n";
+        return EXIT_FAILURE;
+    }
+
+    {
+        const auto plan20 =
+            computeAnalysisSweepPlan(433.0, 20.0, 1024);
+        if (plan20.num_segments != 4 ||
+            plan20.total_bins != 4096 ||
+            plan20.fft_size_per_segment != 1024 ||
+            plan20.segments.size() != 4U) {
+            std::cerr << "AnalysisSweepPlan 20 MHz check failed\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        const auto plan2 = computeAnalysisSweepPlan(433.0, 2.0, 1024);
+        if (plan2.num_segments != 1 ||
+            std::abs(plan2.segments.front().sample_rate_hz - 2.0e6) > 1.0) {
+            std::cerr << "AnalysisSweepPlan 2 MHz single segment failed\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        const auto planWide =
+            computeAnalysisSweepPlan(3000.0, 500.0, 1024);
+        if (planWide.num_segments != ANALYSIS_MAX_SWEEP_SEGMENTS ||
+            !planWide.segments_clamped) {
+            std::cerr << "AnalysisSweepPlan segment clamp failed\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (std::abs(maxAnalysisSpanMHz(3000.0) - 320.0) > 1e-6) {
+        std::cerr << "maxAnalysisSpanMHz sweep cap check failed\n";
+        return EXIT_FAILURE;
+    }
+    if (std::abs(maxAnalysisSpanMHz(5.0) - 8.0) > 1e-6) {
+        std::cerr << "maxAnalysisSpanMHz edge check failed\n";
+        return EXIT_FAILURE;
+    }
+    if (maxAnalysisSpanMHz(1.0) < ANALYSIS_MIN_SPAN_MHZ - 1e-6) {
+        std::cerr << "maxAnalysisSpanMHz minimum check failed\n";
         return EXIT_FAILURE;
     }
 

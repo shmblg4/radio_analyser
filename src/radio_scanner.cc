@@ -3,7 +3,9 @@
 #include <cmath>
 #include <fftw3.h>
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 
 class FFTWBuffer {
@@ -139,7 +141,7 @@ public:
         }
         
         entry.plan = fftw_plan_dft_1d(fft_size, entry.in, entry.out, 
-                                       FFTW_FORWARD, FFTW_MEASURE);
+                                       FFTW_FORWARD, FFTW_ESTIMATE);
         if (!entry.plan) {
             fftw_free(entry.in);
             fftw_free(entry.out);
@@ -194,40 +196,46 @@ private:
 };
 
 std::vector<double>
-performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
+performFFTAndGetMagnitude(const std::complex<float> *input, size_t input_count,
                           int fft_size) {
     if (fft_size <= 0) {
         return {};
     }
-    
-    if (input.empty()) {
+
+    if (input_count == 0) {
         return std::vector<double>(static_cast<size_t>(fft_size), 0.0);
     }
 
-    std::vector<std::complex<float>> samples = input;
-    if (static_cast<int>(samples.size()) > fft_size) {
-        samples.resize(static_cast<size_t>(fft_size));
-    } else if (static_cast<int>(samples.size()) < fft_size) {
-        samples.resize(static_cast<size_t>(fft_size), std::complex<float>(0.0f, 0.0f));
-    }
+    const size_t use_count =
+        std::min(input_count, static_cast<size_t>(fft_size));
+    const size_t start =
+        (input_count > static_cast<size_t>(fft_size))
+            ? input_count - static_cast<size_t>(fft_size)
+            : 0;
 
-    const int sample_count = static_cast<int>(samples.size());
+    auto resources = FFTWCache::instance().getResources(fft_size);
+
+    const int sample_count = fft_size;
     if (sample_count > 1) {
         const double pi2 = 2.0 * M_PI;
         const double denom = static_cast<double>(sample_count - 1);
         for (int i = 0; i < sample_count; ++i) {
-            float window = static_cast<float>(0.5 * (1.0 - std::cos(pi2 * i / denom)));
-            samples[static_cast<size_t>(i)] *= window;
+            const float window =
+                static_cast<float>(0.5 * (1.0 - std::cos(pi2 * i / denom)));
+            if (static_cast<size_t>(i) < use_count) {
+                const auto &s = input[start + static_cast<size_t>(i)];
+                resources.in[i][0] = static_cast<double>(s.real()) * window;
+                resources.in[i][1] = static_cast<double>(s.imag()) * window;
+            } else {
+                resources.in[i][0] = 0.0;
+                resources.in[i][1] = 0.0;
+            }
         }
+    } else if (use_count == 1) {
+        resources.in[0][0] = static_cast<double>(input[start].real());
+        resources.in[0][1] = static_cast<double>(input[start].imag());
     }
 
-    auto resources = FFTWCache::instance().getResources(fft_size);
-    
-    for (int i = 0; i < fft_size; ++i) {
-        resources.in[i][0] = static_cast<double>(samples[static_cast<size_t>(i)].real());
-        resources.in[i][1] = static_cast<double>(samples[static_cast<size_t>(i)].imag());
-    }
-    
     fftw_execute(resources.plan);
 
     std::vector<double> magnitudes(static_cast<size_t>(fft_size));
@@ -239,11 +247,21 @@ performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
 
     const int half_size = fft_size / 2;
     for (int i = 0; i < half_size; ++i) {
-        std::swap(magnitudes[static_cast<size_t>(i)], 
+        std::swap(magnitudes[static_cast<size_t>(i)],
                   magnitudes[static_cast<size_t>(i + half_size)]);
     }
 
     return magnitudes;
+}
+
+std::vector<double>
+performFFTAndGetMagnitude(const std::vector<std::complex<float>> &input,
+                          int fft_size) {
+    if (input.empty()) {
+        return performFFTAndGetMagnitude(
+            static_cast<const std::complex<float> *>(nullptr), 0, fft_size);
+    }
+    return performFFTAndGetMagnitude(input.data(), input.size(), fft_size);
 }
 
 HackrfDevice::HackrfDevice() {
@@ -275,12 +293,14 @@ HackrfDevice::~HackrfDevice() {
     spdlog::info("HackRF device closed");
 }
 
-bool HackrfDevice::configure(const hackrf_alloc_params& alloc_params) {
+bool HackrfDevice::configure(const hackrf_alloc_params& alloc_params,
+                             bool log_details) {
+    std::lock_guard<std::mutex> lock(device_mutex_);
     alloc_params_ = alloc_params;
-    return configureDevice();
+    return configureDevice(log_details);
 }
 
-bool HackrfDevice::configureDevice() {
+bool HackrfDevice::configureDevice(bool log_details) {
     if (!device_) {
         spdlog::error("Cannot configure: device is null");
         return false;
@@ -340,15 +360,30 @@ bool HackrfDevice::configureDevice() {
         return false;
     }
     
-    spdlog::info("{}############ Device configured ############{}",
-                 colors::GREEN, colors::RESET);
-    spdlog::info("Center frequency: {} Hz", alloc_params_.center_freq);
-    spdlog::info("Sample rate: {} Hz", alloc_params_.sample_rate);
-    spdlog::info("Bandwidth: {} Hz", alloc_params_.bandwidth);
-    spdlog::info("VGA gain: {}", alloc_params_.vga_gain);
-    spdlog::info("LNA gain: {}", alloc_params_.lna_gain);
-    spdlog::info("{}###########################################{}",
-                 colors::GREEN, colors::RESET);
+    if (log_details) {
+        spdlog::info("{}############ Device configured ############{}",
+                     colors::GREEN, colors::RESET);
+        spdlog::info("Center frequency: {} Hz", alloc_params_.center_freq);
+        spdlog::info("Sample rate: {} Hz", alloc_params_.sample_rate);
+        spdlog::info("Bandwidth: {} Hz", alloc_params_.bandwidth);
+        spdlog::info("VGA gain: {}", alloc_params_.vga_gain);
+        spdlog::info("LNA gain: {}", alloc_params_.lna_gain);
+        spdlog::info("{}###########################################{}",
+                     colors::GREEN, colors::RESET);
+    }
+
+    const int fft = std::max(1, alloc_params_.fft_size);
+    const size_t fft_cap =
+        static_cast<size_t>(fft) * 2 * sizeof(int8_t) * 4;
+    // Keep at least ~100 ms of IQ for FM demodulation in detection mode.
+    const size_t audio_cap = static_cast<size_t>(
+        std::max(1.0, alloc_params_.sample_rate * 0.1)) *
+        2 * sizeof(int8_t);
+    max_raw_buffer_bytes_ = std::max(fft_cap, audio_cap);
+    {
+        std::lock_guard<std::mutex> lock(samples_mutex_);
+        trimSamplesBufferLocked();
+    }
     return true;
 }
 
@@ -372,10 +407,65 @@ int HackrfDevice::handleRx(hackrf_transfer* transfer) {
     const int8_t* raw_data = reinterpret_cast<const int8_t*>(transfer->buffer);
     samples_buffer_.insert(samples_buffer_.end(), raw_data,
                            raw_data + transfer->valid_length);
+    trimSamplesBufferLocked();
     return 0;
 }
 
+void HackrfDevice::trimSamplesBufferLocked() {
+    if (max_raw_buffer_bytes_ == 0 ||
+        samples_buffer_.size() <= max_raw_buffer_bytes_) {
+        return;
+    }
+    samples_buffer_.erase(
+        samples_buffer_.begin(),
+        samples_buffer_.end() - static_cast<std::ptrdiff_t>(max_raw_buffer_bytes_));
+}
+
+bool HackrfDevice::setCenterFrequency(uint64_t center_freq_hz) {
+    std::lock_guard<std::mutex> lock(device_mutex_);
+    if (!device_) {
+        spdlog::error("Cannot set frequency: device is null");
+        return false;
+    }
+
+    const auto result = hackrf_set_freq(device_, center_freq_hz);
+    if (result != HACKRF_SUCCESS) {
+        spdlog::error("Failed to set frequency to {} Hz: {}",
+                      center_freq_hz,
+                      hackrf_error_name(static_cast<hackrf_error>(result)));
+        return false;
+    }
+
+    alloc_params_.center_freq = center_freq_hz;
+    {
+        std::lock_guard<std::mutex> dc_lock(dc_mutex_);
+        dc_i_accumulator_ = 0.0f;
+        dc_q_accumulator_ = 0.0f;
+    }
+    {
+        std::lock_guard<std::mutex> samples_lock(samples_mutex_);
+        samples_buffer_.clear();
+    }
+    return true;
+}
+
+bool HackrfDevice::waitForRawSamples(size_t raw_bytes_needed, int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> lock(samples_mutex_);
+            if (samples_buffer_.size() >= raw_bytes_needed) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+}
+
 bool HackrfDevice::startRx() {
+    std::lock_guard<std::mutex> lock(device_mutex_);
     if (running_.load()) {
         spdlog::warn("RX already running");
         return false;
@@ -398,6 +488,7 @@ bool HackrfDevice::startRx() {
 }
 
 bool HackrfDevice::stopRx() {
+    std::lock_guard<std::mutex> lock(device_mutex_);
     if (!running_.load()) {
         spdlog::warn("RX already stopped");
         return true;
@@ -429,13 +520,46 @@ std::vector<std::complex<float>> HackrfDevice::getIQSamplesForProcessing(
         local_buffer = std::move(samples_buffer_);
         samples_buffer_.clear();
     }
-    
-    std::vector<std::complex<float>> iq_samples = convertRawSamples(local_buffer);
+
+    if (local_buffer.size() % 2 != 0) {
+        local_buffer.pop_back();
+    }
+    if (local_buffer.empty()) {
+        return {};
+    }
+
+    std::vector<std::complex<float>> iq_samples = convertRawSamples(
+        local_buffer.data(), local_buffer.size() / 2);
     
     if (remove_dc && !iq_samples.empty()) {
         removeDCOffset(iq_samples);
     }
     return iq_samples;
+}
+
+std::vector<double> HackrfDevice::getMagnitudeSpectrumFromLatest(bool remove_dc) {
+    const int fft_size = alloc_params_.fft_size;
+    if (fft_size <= 0) {
+        return {};
+    }
+
+    const size_t raw_needed = static_cast<size_t>(fft_size) * 2;
+    std::vector<int8_t> tail;
+    {
+        std::lock_guard<std::mutex> lock(samples_mutex_);
+        if (samples_buffer_.size() < raw_needed) {
+            return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
+        }
+        tail.assign(samples_buffer_.end() - static_cast<std::ptrdiff_t>(raw_needed),
+                    samples_buffer_.end());
+        samples_buffer_.clear();
+    }
+
+    auto iq_samples = convertRawSamples(tail.data(), static_cast<size_t>(fft_size));
+    if (remove_dc && !iq_samples.empty()) {
+        removeBlockDCOffset(iq_samples);
+    }
+    return getMagnitudeSpectrumFromIQ(iq_samples);
 }
 
 std::vector<double> HackrfDevice::getMagnitudeSpectrum() {
@@ -474,19 +598,14 @@ std::vector<double> HackrfDevice::getMagnitudeSpectrumFromIQ(
 }
 
 std::vector<std::complex<float>>
-HackrfDevice::convertRawSamples(const std::vector<int8_t>& raw_samples) const {
+HackrfDevice::convertRawSamples(const int8_t *raw_data,
+                                size_t num_iq_pairs) const {
     std::vector<std::complex<float>> iq_samples;
-    
-    if (raw_samples.size() % 2 != 0) {
-        spdlog::warn("Raw samples size is odd ({}), dropping last byte", raw_samples.size());
-    }
-    
-    const size_t num_samples = raw_samples.size() / 2;
-    iq_samples.reserve(num_samples);
+    iq_samples.reserve(num_iq_pairs);
 
-    for (size_t i = 0; i < num_samples; ++i) {
-        float i_val = static_cast<float>(raw_samples[2 * i]) / 128.0f;
-        float q_val = static_cast<float>(raw_samples[2 * i + 1]) / 128.0f;
+    for (size_t i = 0; i < num_iq_pairs; ++i) {
+        const float i_val = static_cast<float>(raw_data[2 * i]) / 128.0f;
+        const float q_val = static_cast<float>(raw_data[2 * i + 1]) / 128.0f;
         iq_samples.emplace_back(i_val, q_val);
     }
     return iq_samples;
@@ -495,6 +614,23 @@ HackrfDevice::convertRawSamples(const std::vector<int8_t>& raw_samples) const {
 std::vector<double> HackrfDevice::calculateMagnitudeSpectrum(
     const std::vector<std::complex<float>>& iq_samples, int fft_size) const {
     return performFFTAndGetMagnitude(iq_samples, fft_size);
+}
+
+void HackrfDevice::removeBlockDCOffset(
+    std::vector<std::complex<float>> &iq_samples) {
+    if (iq_samples.empty()) {
+        return;
+    }
+
+    std::complex<float> mean(0.0f, 0.0f);
+    for (const auto &sample : iq_samples) {
+        mean += sample;
+    }
+    mean /= static_cast<float>(iq_samples.size());
+
+    for (auto &sample : iq_samples) {
+        sample -= mean;
+    }
 }
 
 void HackrfDevice::removeDCOffset(std::vector<std::complex<float>>& iq_samples) {

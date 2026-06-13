@@ -23,14 +23,18 @@ public:
     HackrfDevice();
     ~HackrfDevice();
 
-    bool configure(const hackrf_alloc_params& alloc_params);
+    bool configure(const hackrf_alloc_params& alloc_params,
+                   bool log_details = true);
 
     bool startRx();
     bool stopRx();
+    bool setCenterFrequency(uint64_t center_freq_hz);
+    bool waitForRawSamples(size_t raw_bytes_needed, int timeout_ms);
 
     std::vector<std::complex<float>> getIQSamplesForProcessing(
         bool remove_dc = true);
     std::vector<double> getMagnitudeSpectrum();
+    std::vector<double> getMagnitudeSpectrumFromLatest(bool remove_dc = false);
     std::vector<double> getMagnitudeSpectrumFromIQ(
         const std::vector<std::complex<float>> &iq_samples);
 
@@ -44,18 +48,23 @@ private:
 
     std::vector<int8_t> samples_buffer_;
     mutable std::mutex samples_mutex_;
+    std::mutex device_mutex_;
     std::atomic<bool> running_{false};
 
-    bool configureDevice();
+    bool configureDevice(bool log_details);
     bool validateGains(int vga_gain, int lna_gain) const;
     static int rxCallback(hackrf_transfer* transfer);
     int handleRx(hackrf_transfer* transfer);
 
     std::vector<std::complex<float>>
-    convertRawSamples(const std::vector<int8_t>& raw_samples) const;
+    convertRawSamples(const int8_t *raw_data, size_t num_iq_pairs) const;
     std::vector<double> calculateMagnitudeSpectrum(
         const std::vector<std::complex<float>>& iq_samples, int fft_size) const;
     void removeDCOffset(std::vector<std::complex<float>>& iq_samples);
+    static void removeBlockDCOffset(std::vector<std::complex<float>>& iq_samples);
+    void trimSamplesBufferLocked();
+
+    size_t max_raw_buffer_bytes_ = 0;
 
     float dc_i_accumulator_ = 0.0f;
     float dc_q_accumulator_ = 0.0f;
