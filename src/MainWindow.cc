@@ -2,11 +2,13 @@
 #include "AnalysisParams.hpp"
 #include "MainWindowConstants.hpp"
 #include "AudioProcessorThread.hpp"
+#include "FpgaFftProcessor.hpp"
 #include "LogSink.hpp"
 #include "SpectrumWorker.hpp"
 #include "radio_scanner.hpp"
 
 #include <QMetaObject>
+#include <QSignalBlocker>
 #include <QThread>
 
 #ifdef HAVE_QT_AUDIO
@@ -146,6 +148,7 @@ MainWindow::MainWindow(QWidget *parent)
                                   "Failed to configure HackRF device.");
             return;
         }
+        applyFftBackendToDevice();
         device->startRx();
     } catch (const std::exception &e) {
         spdlog::error("Error initializing HackRF: {}", e.what());
@@ -328,6 +331,9 @@ void MainWindow::applyConfig() {
         return;
     }
 
+    enforceFftBackendConstraints();
+    applyFftBackendToDevice();
+
     if (appMode_ == AppMode::Analysis) {
         rebuildAnalysisSweepPlan();
         fftSize = analysisSweepPlan_.total_bins;
@@ -451,6 +457,7 @@ int MainWindow::waterfallDisplayBins() const {
 }
 
 void MainWindow::rebuildAnalysisSweepPlan() {
+    enforceFftBackendConstraints();
     const int fft_per_segment =
         analysisFftBox_ ? analysisFftBox_->currentData().toInt()
                         : ANALYSIS_DEFAULT_SWEEP_FFT_SIZE;
@@ -459,6 +466,42 @@ void MainWindow::rebuildAnalysisSweepPlan() {
         analysisSpanSpinBox_ ? analysisSpanSpinBox_->value()
                              : ANALYSIS_DEFAULT_SPAN_MHZ,
         fft_per_segment);
+}
+
+bool MainWindow::isFpgaFftSelected() const {
+    return fftBackendBox_ &&
+           static_cast<FftBackend>(fftBackendBox_->currentData().toInt()) ==
+               FftBackend::FPGA;
+}
+
+void MainWindow::applyFftBackendToDevice() {
+    if (!device) {
+        return;
+    }
+    device->setFftBackend(isFpgaFftSelected() ? FftBackend::FPGA
+                                               : FftBackend::FFTW3);
+}
+
+void MainWindow::enforceFftBackendConstraints() {
+    if (!isFpgaFftSelected()) {
+        return;
+    }
+
+    if (analysisFftBox_ &&
+        analysisFftBox_->currentData().toInt() != FpgaFftProcessor::kFftSize) {
+        const QSignalBlocker blocker(analysisFftBox_);
+        analysisFftBox_->setCurrentIndex(
+            analysisFftBox_->findData(FpgaFftProcessor::kFftSize));
+    }
+    if (fftSizeBox &&
+        fftSizeBox->currentData().toInt() != FpgaFftProcessor::kFftSize) {
+        const QSignalBlocker blocker(fftSizeBox);
+        fftSizeBox->setCurrentIndex(
+            fftSizeBox->findData(FpgaFftProcessor::kFftSize));
+        if (fftSizeLabel) {
+            fftSizeLabel->setText(QString::number(FpgaFftProcessor::kFftSize));
+        }
+    }
 }
 
 void MainWindow::updateSpectrumRefreshInterval() {

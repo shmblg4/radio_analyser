@@ -135,6 +135,18 @@ void MainWindow::setupControls() {
     analysisFftBox_->setCurrentIndex(
         analysisFftBox_->findData(ANALYSIS_DEFAULT_SWEEP_FFT_SIZE));
 
+    fftBackendBox_ = new QComboBox();
+    fftBackendBox_->addItem("FFTW3", static_cast<int>(FftBackend::FFTW3));
+    fftBackendBox_->addItem("FPGA FFT", static_cast<int>(FftBackend::FPGA));
+    fftBackendBox_->setCurrentIndex(0);
+    connect(fftBackendBox_,
+            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        enforceFftBackendConstraints();
+        applyFftBackendToDevice();
+        updateDspMetricsInfo();
+    });
+
     sampleRateSpinBox = new QDoubleSpinBox();
     sampleRateSpinBox->setRange(MIN_SAMPLE_RATE_MHZ, MAX_SAMPLE_RATE_MHZ);
     sampleRateSpinBox->setValue(DETECTION_DEFAULT_SAMPLE_RATE_MHZ);
@@ -496,6 +508,8 @@ void MainWindow::setupLayout() {
     QVBoxLayout *configColumnLayout = new QVBoxLayout;
     configColumnLayout->addWidget(new QLabel(tr("Центральная частота:"), this));
     configColumnLayout->addWidget(frequencySpinBox);
+    configColumnLayout->addWidget(new QLabel(tr("FFT backend:"), this));
+    configColumnLayout->addWidget(fftBackendBox_);
     configColumnLayout->addWidget(analysisControlsGroup_);
     configColumnLayout->addWidget(detectionControlsGroup_);
     configColumnLayout->addWidget(listeningInfoGroup_);
@@ -627,6 +641,7 @@ void MainWindow::updateModeControls() {
         updateAnalysisSpanRange();
     }
 
+    enforceFftBackendConstraints();
     updateDspMetricsInfo();
     updateListeningParameterControls();
 }
@@ -669,7 +684,7 @@ void MainWindow::updateListeningParameterControls() {
         analysisSpanSpinBox_->setEnabled(enabled);
     }
     if (analysisFftBox_) {
-        analysisFftBox_->setEnabled(enabled);
+        analysisFftBox_->setEnabled(enabled && !isFpgaFftSelected());
     }
     if (sampleRateSpinBox) {
         sampleRateSpinBox->setEnabled(enabled);
@@ -679,5 +694,11 @@ void MainWindow::updateListeningParameterControls() {
     }
     if (applyButton) {
         applyButton->setEnabled(enabled);
+    }
+    if (fftSizeBox) {
+        fftSizeBox->setEnabled(enabled && !isFpgaFftSelected());
+    }
+    if (fftBackendBox_) {
+        fftBackendBox_->setEnabled(enabled);
     }
 }

@@ -52,6 +52,8 @@ void MainWindow::toggleListening() {
 
     if (!listeningActive) {
         listeningActive = true;
+        enforceFftBackendConstraints();
+        applyFftBackendToDevice();
 
         const double desired_center_hz =
             frequencySpinBox ? (frequencySpinBox->value() * 1e6) : 0.0;

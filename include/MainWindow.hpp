@@ -96,6 +96,9 @@ private:
     int spectrumRefreshIntervalMs() const;
     int waterfallDisplayBins() const;
     void rebuildAnalysisSweepPlan();
+    bool isFpgaFftSelected() const;
+    void applyFftBackendToDevice();
+    void enforceFftBackendConstraints();
 
     std::unique_ptr<HackrfDevice> device;
 
@@ -134,6 +137,7 @@ private:
     QDoubleSpinBox *frequencySpinBox;
     QDoubleSpinBox *analysisSpanSpinBox_ = nullptr;
     QComboBox *analysisFftBox_ = nullptr;
+    QComboBox *fftBackendBox_ = nullptr;
     QDoubleSpinBox *sampleRateSpinBox;
     QDoubleSpinBox *bandwidthSpinBox;
     QSlider *vgaSlider;
