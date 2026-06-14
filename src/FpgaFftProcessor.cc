@@ -23,6 +23,19 @@ constexpr size_t kMinNonzeroRxBins = 32;
 constexpr unsigned kRxResponseTimeoutMs = 400;
 constexpr int kMaxTxAttempts = 4;
 constexpr unsigned kMaxStaleRxDiscards = 16;
+constexpr double kHannCoherentGain = 0.5;
+constexpr double kInputFullScale = 128.0;
+
+double hannWindow(size_t i) {
+    if (FpgaFftProcessor::kFftSize <= 1) {
+        return 1.0;
+    }
+    constexpr double pi = 3.14159265358979323846;
+    const double phase =
+        2.0 * pi * static_cast<double>(i) /
+        static_cast<double>(FpgaFftProcessor::kFftSize - 1);
+    return 0.5 * (1.0 - std::cos(phase));
+}
 
 int32_t readLeI32(const uint8_t *p) {
     const uint32_t v = static_cast<uint32_t>(p[0]) |
@@ -505,8 +518,10 @@ std::vector<uint8_t> FpgaFftProcessor::makeTxFrame(
 
     for (size_t i = 0; i < count; ++i) {
         const auto &s = iq_samples[start + i];
-        const int8_t re = clampToInt8(s.real());
-        const int8_t im = clampToInt8(invert_imag ? -s.imag() : s.imag());
+        const double window = hannWindow(i);
+        const int8_t re = clampToInt8(static_cast<float>(s.real() * window));
+        const int8_t im = clampToInt8(
+            static_cast<float>((invert_imag ? -s.imag() : s.imag()) * window));
         tx[2 * i] = static_cast<uint8_t>(re);
         tx[2 * i + 1] = static_cast<uint8_t>(im);
     }
@@ -528,31 +543,28 @@ std::vector<uint8_t> FpgaFftProcessor::makeTxFrameFromRaw(const int8_t *raw_iq,
     const size_t count =
         std::min(num_iq_pairs, static_cast<size_t>(kFftSize));
 
-    int max_abs = 0;
+    double mean_re = 0.0;
+    double mean_im = 0.0;
     for (size_t i = 0; i < count; ++i) {
-        const int8_t re = raw_iq[2 * (start + i)];
-        const int8_t im = raw_iq[2 * (start + i) + 1];
-        max_abs = std::max(max_abs, std::max(std::abs(static_cast<int>(re)),
-                                             std::abs(static_cast<int>(im))));
+        mean_re += static_cast<double>(raw_iq[2 * (start + i)]);
+        mean_im += static_cast<double>(raw_iq[2 * (start + i) + 1]);
     }
-
-    int gain = 1;
-    constexpr int kTargetTxPeak = 96;
-    constexpr int kMinTxPeakBeforeGain = 64;
-    constexpr int kMaxTxGain = 16;
-    if (max_abs > 0 && max_abs < kMinTxPeakBeforeGain) {
-        gain = std::min(kMaxTxGain, kTargetTxPeak / max_abs);
-    }
+    mean_re /= static_cast<double>(std::max<size_t>(1, count));
+    mean_im /= static_cast<double>(std::max<size_t>(1, count));
 
     for (size_t i = 0; i < count; ++i) {
-        const int8_t re = raw_iq[2 * (start + i)];
-        const int8_t im = raw_iq[2 * (start + i) + 1];
-        const int8_t scaled_re = clampInt32ToInt8(static_cast<int>(re) * gain);
-        const int8_t scaled_im =
-            clampInt32ToInt8(static_cast<int>(im) * gain);
-        tx[2 * i] = static_cast<uint8_t>(scaled_re);
-        tx[2 * i + 1] = static_cast<uint8_t>(
-            invert_imag ? static_cast<int8_t>(-scaled_im) : scaled_im);
+        const double re =
+            static_cast<double>(raw_iq[2 * (start + i)]) - mean_re;
+        const double im =
+            static_cast<double>(raw_iq[2 * (start + i) + 1]) - mean_im;
+        const double window = hannWindow(i);
+        const int windowed_re =
+            static_cast<int>(std::llround(re * window));
+        const int windowed_im =
+            static_cast<int>(std::llround(im * window));
+        tx[2 * i] = static_cast<uint8_t>(clampInt32ToInt8(windowed_re));
+        tx[2 * i + 1] = static_cast<uint8_t>(clampInt32ToInt8(
+            invert_imag ? -windowed_im : windowed_im));
     }
     return tx;
 }
@@ -566,7 +578,8 @@ std::vector<double> FpgaFftProcessor::rxFrameToSpectrumDb(const uint8_t *rx_data
     std::vector<double> spectrum_db(static_cast<size_t>(kFftSize), -240.0);
     const size_t complete_bins =
         std::min(static_cast<size_t>(kFftSize), rx_size / kBytesPerFftBin);
-    const double fft_norm = static_cast<double>(kFftSize);
+    const double full_scale =
+        static_cast<double>(kFftSize) * kHannCoherentGain * kInputFullScale;
     for (size_t fpga_bin = 0; fpga_bin < complete_bins; ++fpga_bin) {
         const size_t offset = fpga_bin * kBytesPerFftBin;
         const int32_t re = readLeI32(rx_data + offset);
@@ -577,16 +590,14 @@ std::vector<double> FpgaFftProcessor::rxFrameToSpectrumDb(const uint8_t *rx_data
         const int display_bin =
             correctedDisplayBinForFpgaBin(static_cast<int>(fpga_bin));
         spectrum_db[static_cast<size_t>(display_bin)] =
-            20.0 * std::log10(magnitude / fft_norm + 1e-12);
+            20.0 * std::log10(magnitude / full_scale + 1e-12);
     }
     return spectrum_db;
 }
 
 int FpgaFftProcessor::correctedDisplayBinForFpgaBin(int fpga_bin) {
-    if (fpga_bin <= 0) {
-        return 0;
-    }
-    return kFftSize - fpga_bin;
+    const int mirrored = fpga_bin <= 0 ? 0 : kFftSize - fpga_bin;
+    return (mirrored + kFftSize / 2) % kFftSize;
 }
 
 bool FpgaFftProcessor::ensureOpen(std::string &error) {

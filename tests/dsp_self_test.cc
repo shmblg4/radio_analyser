@@ -155,11 +155,14 @@ int main() {
 
     {
         std::vector<std::complex<float>> iq(FpgaFftProcessor::kFftSize);
-        iq[0] = {1.0f, 0.5f};
+        const size_t center = FpgaFftProcessor::kFftSize / 2;
+        iq[center] = {1.0f, 0.5f};
         const auto tx = FpgaFftProcessor::makeTxFrame(iq, false);
         if (tx.size() != FpgaFftProcessor::kTxFrameBytes ||
-            static_cast<int8_t>(tx[0]) != 127 ||
-            static_cast<int8_t>(tx[1]) != 64) {
+            static_cast<int8_t>(tx[0]) != 0 ||
+            static_cast<int8_t>(tx[1]) != 0 ||
+            static_cast<int8_t>(tx[2 * center]) != 127 ||
+            static_cast<int8_t>(tx[2 * center + 1]) != 63) {
             std::cerr << "FPGA TX frame int8 IQ conversion failed\n";
             return EXIT_FAILURE;
         }
@@ -183,8 +186,11 @@ int main() {
                 bestBin = i;
             }
         }
-        if (bestBin != 100) {
-            std::cerr << "FPGA mirrored bin correction failed: expected 100 got "
+        const int expectedDisplayBin =
+            FpgaFftProcessor::kFftSize / 2 + 100;
+        if (bestBin != expectedDisplayBin) {
+            std::cerr << "FPGA mirrored/shifted bin correction failed: expected "
+                      << expectedDisplayBin << " got "
                       << bestBin << "\n";
             return EXIT_FAILURE;
         }
@@ -203,6 +209,29 @@ int main() {
         if (spectrum.size() !=
             static_cast<size_t>(FpgaFftProcessor::kFftSize)) {
             std::cerr << "FPGA partial RX frame parse failed\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        std::vector<int8_t> raw(FpgaFftProcessor::kFftSize * 2, 0);
+        for (size_t i = 0; i < raw.size(); i += 2) {
+            raw[i] = 20;
+            raw[i + 1] = -12;
+        }
+        const auto tx =
+            FpgaFftProcessor::makeTxFrameFromRaw(raw.data(),
+                                                 FpgaFftProcessor::kFftSize,
+                                                 false);
+        bool anyNonzero = false;
+        for (uint8_t b : tx) {
+            if (static_cast<int8_t>(b) != 0) {
+                anyNonzero = true;
+                break;
+            }
+        }
+        if (anyNonzero) {
+            std::cerr << "FPGA raw DC removal failed\n";
             return EXIT_FAILURE;
         }
     }

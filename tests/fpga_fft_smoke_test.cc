@@ -46,5 +46,12 @@ int main(int argc, char **argv) {
 
     std::cout << "tone_bin=" << tone_bin << " peak_bin=" << best_bin
               << " peak_db=" << best_db << "\n";
-    return best_bin == tone_bin ? EXIT_SUCCESS : EXIT_FAILURE;
+    const int expected_display_bin =
+        (FpgaFftProcessor::kFftSize / 2 + tone_bin) %
+        FpgaFftProcessor::kFftSize;
+    if (best_bin != expected_display_bin) {
+        std::cerr << "expected_display_bin=" << expected_display_bin << "\n";
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
