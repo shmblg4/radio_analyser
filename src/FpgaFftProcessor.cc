@@ -9,12 +9,16 @@
 #include <thread>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+
 #ifdef HAVE_FTDI_D2XX
 #include <ftd2xx.h>
 #endif
 
 namespace {
 constexpr size_t kBytesPerFftBin = 2U * sizeof(int32_t);
+constexpr size_t kMinUsefulRxBytes = FpgaFftProcessor::kRxFrameBytes -
+                                     (kBytesPerFftBin - 1U);
 constexpr size_t kMinNonzeroRxBins = 32;
 constexpr unsigned kRxResponseTimeoutMs = 400;
 constexpr int kMaxTxAttempts = 4;
@@ -51,6 +55,33 @@ RxFrameStats measureRxFrame(const uint8_t *rx_data, size_t bytes_read) {
         }
     }
     return stats;
+}
+
+std::string rxBytesHex(const uint8_t *rx_data, size_t bytes_read,
+                       size_t max_bytes) {
+    if (!rx_data || bytes_read == 0) {
+        return "";
+    }
+    std::ostringstream out;
+    out << std::hex;
+    const size_t n = std::min(bytes_read, max_bytes);
+    for (size_t i = 0; i < n; ++i) {
+        if (i > 0) {
+            out << ' ';
+        }
+        out << static_cast<unsigned>(rx_data[i]);
+    }
+    return out.str();
+}
+
+bool shouldLogDebugFrame() {
+    static bool consumed = false;
+    const char *env = std::getenv("FPGA_FFT_DEBUG_FRAME");
+    if (consumed || !env || *env == '\0' || *env == '0') {
+        return false;
+    }
+    consumed = true;
+    return true;
 }
 
 int8_t clampToInt8(float value) {
@@ -256,8 +287,9 @@ bool FpgaFftProcessor::transferFrame(const std::vector<uint8_t> &tx,
         }
 
         bytes_read = 0;
-        if (!readFrame(rx.data(), rx.size(), bytes_read, last_attempt_error) ||
-            bytes_read < kRxFrameBytes) {
+        const bool read_complete =
+            readFrame(rx.data(), rx.size(), bytes_read, last_attempt_error);
+        if (!read_complete && bytes_read < kBytesPerFftBin) {
             continue;
         }
 
@@ -279,6 +311,54 @@ bool FpgaFftProcessor::transferFrame(const std::vector<uint8_t> &tx,
         }
 
         spectrum_db = std::move(trial_spectrum);
+        if (shouldLogDebugFrame()) {
+            double min_db = 1e9;
+            double max_db = -1e9;
+            double sum_db = 0.0;
+            int max_bin = 0;
+            int floor_bins = 0;
+            for (int i = 0; i < static_cast<int>(spectrum_db.size()); ++i) {
+                const double v = spectrum_db[static_cast<size_t>(i)];
+                min_db = std::min(min_db, v);
+                sum_db += v;
+                if (v > max_db) {
+                    max_db = v;
+                    max_bin = i;
+                }
+                if (v <= -239.0) {
+                    ++floor_bins;
+                }
+            }
+
+            std::ostringstream first_bins;
+            const size_t complete_bins = bytes_read / kBytesPerFftBin;
+            const size_t preview_bins = std::min<size_t>(complete_bins, 8);
+            for (size_t bin = 0; bin < preview_bins; ++bin) {
+                const size_t offset = bin * kBytesPerFftBin;
+                const int32_t re = readLeI32(rx.data() + offset);
+                const int32_t im =
+                    readLeI32(rx.data() + offset + sizeof(int32_t));
+                const double re_d = static_cast<double>(re);
+                const double im_d = static_cast<double>(im);
+                const double power = re_d * re_d + im_d * im_d;
+                const double db = 10.0 * std::log10(power + 1.0);
+                if (bin > 0) {
+                    first_bins << " | ";
+                }
+                first_bins << bin << ":re=" << re << ",im=" << im
+                           << ",p=" << power << ",db=" << db;
+            }
+
+            spdlog::info(
+                "FPGA frame debug: tx_size={} rx_size={} complete_bins={} "
+                "first16_rx='{}' first_bins='{}' zero_bins={} floor_bins={} "
+                "max_bin={} max_db={} min_db={} avg_db={}",
+                tx.size(), bytes_read, complete_bins,
+                rxBytesHex(rx.data(), bytes_read, 16), first_bins.str(),
+                FpgaFftProcessor::kFftSize - rx_nonzero_bins, floor_bins,
+                max_bin, max_db, min_db,
+                sum_db / static_cast<double>(std::max<size_t>(1, spectrum_db.size())));
+        }
         frame_valid = true;
         warmed_up_ = true;
     }
@@ -350,7 +430,7 @@ bool FpgaFftProcessor::waitForFreshRxAfterTx(
             return false;
         }
         rx_queued = static_cast<unsigned>(queued);
-        if (queued >= static_cast<DWORD>(kRxFrameBytes)) {
+        if (queued >= static_cast<DWORD>(kMinUsefulRxBytes)) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

@@ -151,7 +151,10 @@ target_include_directories(dsp_self_test PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${FFTW3_INCLUDE_DIRS}
 )
-target_link_libraries(dsp_self_test PRIVATE ${FFTW3_LIBRARIES})
+target_link_libraries(dsp_self_test PRIVATE
+    ${FFTW3_LIBRARIES}
+    spdlog::spdlog
+)
 if(FTD2XX_FOUND)
     target_include_directories(dsp_self_test PRIVATE ${FTD2XX_INCLUDE_DIR})
     target_link_libraries(dsp_self_test PRIVATE ${FTD2XX_LIBRARY})
@@ -166,6 +169,7 @@ add_executable(fpga_fft_smoke_test
 target_include_directories(fpga_fft_smoke_test PRIVATE
     ${PROJECT_SOURCE_DIR}/include
 )
+target_link_libraries(fpga_fft_smoke_test PRIVATE spdlog::spdlog)
 if(FTD2XX_FOUND)
     target_include_directories(fpga_fft_smoke_test PRIVATE ${FTD2XX_INCLUDE_DIR})
     target_link_libraries(fpga_fft_smoke_test PRIVATE ${FTD2XX_LIBRARY})
