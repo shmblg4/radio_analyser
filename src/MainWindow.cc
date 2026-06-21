@@ -308,8 +308,13 @@ void MainWindow::refreshSpectrumPlot() {
                         data->setCell(i, j, emptyCellDb);
                     }
                 }
-                waterfallWriteRow_ = 0;
                 waterfallGridInitialized_ = true;
+            }
+
+            for (int j = waterfallHistorySize - 1; j >= 1; --j) {
+                for (int i = 0; i < wf_bins; ++i) {
+                    data->setCell(i, j, data->cell(i, j - 1));
+                }
             }
 
             const double step =
@@ -318,10 +323,8 @@ void MainWindow::refreshSpectrumPlot() {
                 const int src =
                     std::min(fftSize - 1, static_cast<int>(i * step));
                 data->setCell(
-                    i, waterfallWriteRow_,
-                    spectrum_db[static_cast<size_t>(src)]);
+                    i, 0, spectrum_db[static_cast<size_t>(src)]);
             }
-            waterfallWriteRow_ = (waterfallWriteRow_ + 1) % waterfallHistorySize;
 
             plot->replot(QCustomPlot::rpQueuedReplot);
         }

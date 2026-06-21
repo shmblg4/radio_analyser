@@ -131,7 +131,6 @@ private:
     std::vector<double> windowed_samples;
     std::deque<QVector<double>> waterfallHistory;
     int waterfallHistorySize = 200;
-    int waterfallWriteRow_ = 0;
     bool waterfallGridInitialized_ = false;
 
     std::vector<double> detectedFrequencies;
