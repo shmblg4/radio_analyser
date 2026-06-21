@@ -81,7 +81,6 @@ void MainWindow::toggleListening() {
         }
         
         setupPlot();
-        updateDspMetricsInfo();
         logBaselineMetrics("startListening");
 
         if (listenToggleButton)
@@ -130,7 +129,6 @@ void MainWindow::toggleListening() {
     }
 
     updateListeningParameterControls();
-    updateDspMetricsInfo();
     if (listeningStatusLabel || listeningFrequencyLabel) {
         updateListeningStatus();
     }

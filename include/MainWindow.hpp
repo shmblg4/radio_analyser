@@ -27,6 +27,8 @@
 #include <QPointer>
 #include <QListWidget>
 #include <QPlainTextEdit>
+#include <QEvent>
+#include <QMouseEvent>
 #include <deque>
 #include <memory>
 #include <vector>
@@ -52,7 +54,7 @@ private slots:
     void updateSpectrum();
     void updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq_samples);
     void onSpectrumReady(std::vector<double> spectrum_db);
-    void applyConfig();
+    void applyConfig(bool show_detection_success = true);
     void updateAveragePower();
     void scanActive();
     void activeFreqCleanup();
@@ -72,7 +74,6 @@ private:
     void configure();
     void setupPlot();
     void setupControls();
-    void setupInfo();
     void setupToolbar();
     void setupMenuBar();
     void setupLayout();
@@ -90,7 +91,6 @@ private:
     double getRbwHz() const;
     double getDetectionToleranceMHz() const;
     double estimateSubBinFrequencyMHz(int bin) const;
-    void updateDspMetricsInfo();
     void logBaselineMetrics(const char *context) const;
     void updateSpectrumRefreshInterval();
     int spectrumRefreshIntervalMs() const;
@@ -99,6 +99,15 @@ private:
     bool isFpgaFftSelected() const;
     void applyFftBackendToDevice();
     void enforceFftBackendConstraints();
+    void setupSpectrumCursor();
+    void updateSpectrumCursorStyle(bool dark);
+    void hideSpectrumCursor();
+    void onPlotMouseMove(QMouseEvent *event);
+    void onPlotMousePress(QMouseEvent *event);
+    double spectrumFrequencyMHzAt(const QPoint &pos) const;
+
+    QPointer<QCPItemStraightLine> spectrumCursorLine_ = nullptr;
+    QPointer<QCPItemText> spectrumCursorLabel_ = nullptr;
 
     std::unique_ptr<HackrfDevice> device;
 
@@ -160,19 +169,6 @@ private:
     QListWidget *detectedFrequenciesList;
     QPushButton *clearDetectedButton;
 
-    QGroupBox *info;
-    QLabel *averagePowerLabel = nullptr;
-    QLabel *rbwLabel = nullptr;
-    QLabel *detectionToleranceLabel = nullptr;
-    QLabel *segmentsInfoLabel_ = nullptr;
-    QLabel *totalBinsInfoLabel_ = nullptr;
-    QLabel *analysisHintLabel_ = nullptr;
-    QWidget *averagePowerRow_ = nullptr;
-    QWidget *detectionToleranceRow_ = nullptr;
-    QWidget *segmentsInfoRow_ = nullptr;
-    QWidget *totalBinsInfoRow_ = nullptr;
-    QWidget *analysisHintRow_ = nullptr;
-
     QGroupBox *listeningInfoGroup_ = nullptr;
 
     QGroupBox *logGroup = nullptr;
@@ -207,6 +203,9 @@ private slots:
     void toggleDisplayMode();
     void updateListeningStatus();
     void onDetectedFrequencyClicked(QListWidgetItem* item);
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 };
 
 #endif
