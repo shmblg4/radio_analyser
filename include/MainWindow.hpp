@@ -99,6 +99,8 @@ private:
     bool isFpgaFftSelected() const;
     void applyFftBackendToDevice();
     void enforceFftBackendConstraints();
+    void clearSpectrumHold();
+    bool applyIncomingSpectrum(std::vector<double> frame);
     void setupSpectrumCursor();
     void updateSpectrumCursorStyle(bool dark);
     void hideSpectrumCursor();
@@ -128,6 +130,7 @@ private:
     std::vector<double> x_axis_values;
     QVector<double> plot_x_cache_;
     std::vector<double> spectrum_db;
+    std::vector<double> last_good_spectrum_db_;
     std::vector<double> windowed_samples;
     std::deque<QVector<double>> waterfallHistory;
     int waterfallHistorySize = 200;

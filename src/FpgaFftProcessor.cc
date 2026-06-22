@@ -322,6 +322,10 @@ bool FpgaFftProcessor::transferFrame(const std::vector<uint8_t> &tx,
                 "FPGA RX frame looked like stale comb noise";
             continue;
         }
+        if (isSaturatedSpectrum(trial_spectrum)) {
+            last_attempt_error = "FPGA RX frame looked saturated";
+            continue;
+        }
 
         spectrum_db = std::move(trial_spectrum);
         if (shouldLogDebugFrame()) {
@@ -384,6 +388,40 @@ bool FpgaFftProcessor::transferFrame(const std::vector<uint8_t> &tx,
     }
 
     return spectrum_db.size() == static_cast<size_t>(kFftSize);
+}
+
+bool FpgaFftProcessor::isSaturatedSpectrum(
+    const std::vector<double> &spectrum_db) {
+    if (spectrum_db.empty()) {
+        return false;
+    }
+
+    double max_db = -1e9;
+    double min_db = 1e9;
+    int above_plot_ceiling = 0;
+    int very_hot = 0;
+    for (double value : spectrum_db) {
+        max_db = std::max(max_db, value);
+        min_db = std::min(min_db, value);
+        if (value > 45.0) {
+            ++above_plot_ceiling;
+        }
+        if (value > 15.0) {
+            ++very_hot;
+        }
+    }
+
+    if (max_db > 40.0) {
+        return true;
+    }
+    if (above_plot_ceiling >= 8) {
+        return true;
+    }
+    if (very_hot > static_cast<int>(spectrum_db.size()) / 3 &&
+        (max_db - min_db) < 15.0) {
+        return true;
+    }
+    return false;
 }
 
 bool FpgaFftProcessor::isCombGarbageSpectrum(

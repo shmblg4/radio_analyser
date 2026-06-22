@@ -39,6 +39,7 @@ public:
                                                    size_t rx_size);
     static int correctedDisplayBinForFpgaBin(int fpga_bin);
     static bool isCombGarbageSpectrum(const std::vector<double> &spectrum_db);
+    static bool isSaturatedSpectrum(const std::vector<double> &spectrum_db);
 
 private:
     bool ensureOpen(std::string &error);

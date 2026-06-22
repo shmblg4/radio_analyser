@@ -255,6 +255,22 @@ int main() {
         }
     }
 
+    {
+        std::vector<double> saturated(1024, 48.0);
+        if (!FpgaFftProcessor::isSaturatedSpectrum(saturated)) {
+            std::cerr << "FPGA saturated spectrum detector failed on pegged frame\n";
+            return EXIT_FAILURE;
+        }
+
+        std::vector<double> tone(1024, -120.0);
+        tone[100] = -5.0;
+        tone[200] = -18.0;
+        if (FpgaFftProcessor::isSaturatedSpectrum(tone)) {
+            std::cerr << "FPGA saturated spectrum detector rejected valid tone\n";
+            return EXIT_FAILURE;
+        }
+    }
+
     std::cout << "DSP self-test passed\n";
     return EXIT_SUCCESS;
 }

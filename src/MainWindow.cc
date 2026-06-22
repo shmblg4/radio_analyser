@@ -218,7 +218,9 @@ void MainWindow::updateSpectrum() {
 }
 
 void MainWindow::onSpectrumReady(std::vector<double> result) {
-    spectrum_db = std::move(result);
+    if (!applyIncomingSpectrum(std::move(result))) {
+        return;
+    }
     refreshSpectrumPlot();
 }
 
@@ -226,7 +228,9 @@ void MainWindow::updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq
     if (!device || iq_samples.empty())
         return;
 
-    spectrum_db = device->getMagnitudeSpectrumFromIQ(iq_samples);
+    if (!applyIncomingSpectrum(device->getMagnitudeSpectrumFromIQ(iq_samples))) {
+        return;
+    }
     refreshSpectrumPlot();
 }
 
@@ -479,8 +483,34 @@ void MainWindow::applyFftBackendToDevice() {
     if (!device) {
         return;
     }
+    clearSpectrumHold();
     device->setFftBackend(isFpgaFftSelected() ? FftBackend::FPGA
                                                : FftBackend::FFTW3);
+}
+
+void MainWindow::clearSpectrumHold() {
+    last_good_spectrum_db_.clear();
+}
+
+bool MainWindow::applyIncomingSpectrum(std::vector<double> frame) {
+    if (frame.empty()) {
+        return false;
+    }
+
+    if (isFpgaFftSelected() &&
+        FpgaFftProcessor::isSaturatedSpectrum(frame)) {
+        if (last_good_spectrum_db_.size() == frame.size()) {
+            spectrum_db = last_good_spectrum_db_;
+            return true;
+        }
+        return false;
+    }
+
+    spectrum_db = std::move(frame);
+    if (isFpgaFftSelected()) {
+        last_good_spectrum_db_ = spectrum_db;
+    }
+    return true;
 }
 
 void MainWindow::enforceFftBackendConstraints() {
