@@ -1,5 +1,6 @@
 #include "MainWindow.hpp"
 #include "AnalysisParams.hpp"
+#include "AudioProcessorThread.hpp"
 #include "MainWindowConstants.hpp"
 #include <QFontDatabase>
 #include <QMessageBox>
@@ -402,6 +403,24 @@ void MainWindow::setupLayout() {
                 updateListeningStatus();
             });
         }
+
+        if (!demodModeCombo_) {
+            demodModeCombo_ = new QComboBox(this);
+            demodModeCombo_->addItem(tr("NFM (рация)"),
+                                     static_cast<int>(FmDemodMode::NFM));
+            demodModeCombo_->addItem(tr("WFM (FM-эфир)"),
+                                     static_cast<int>(FmDemodMode::WFM));
+            connect(demodModeCombo_,
+                    static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+                    this, [this](int) {
+                if (audioProcessorThread) {
+                    audioProcessorThread->resetDSPState();
+                    audioProcessorThread->clearPendingQueue();
+                }
+            });
+        }
+        listeningInfoLayout->addWidget(new QLabel(tr("Демодуляция:"), this));
+        listeningInfoLayout->addWidget(demodModeCombo_);
         listeningInfoLayout->addWidget(
             new QLabel(tr("Уход от нуля (IF offset):"), this));
         listeningInfoLayout->addWidget(demodOffsetSpinBox);
@@ -546,11 +565,7 @@ void MainWindow::updateModeControls() {
     }
 
     if (frequencySpinBox) {
-        if (analysis) {
-            frequencySpinBox->setRange(ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
-        } else {
-            frequencySpinBox->setRange(DETECTION_MIN_FREQ_MHZ, DETECTION_MAX_FREQ_MHZ);
-        }
+        frequencySpinBox->setRange(ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
         frequencySpinBox->setDecimals(3);
         frequencySpinBox->setSingleStep(0.001);
     }

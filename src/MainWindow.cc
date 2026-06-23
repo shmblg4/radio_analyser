@@ -727,7 +727,7 @@ void MainWindow::onPlotMousePress(QMouseEvent *event) {
     }
 
     double freq_mhz = spectrumFrequencyMHzAt(event->pos());
-    freq_mhz = std::clamp(freq_mhz, DETECTION_MIN_FREQ_MHZ, DETECTION_MAX_FREQ_MHZ);
+    freq_mhz = std::clamp(freq_mhz, ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
 
     if (std::abs(freq_mhz - frequencySpinBox->value()) < 1e-6) {
         return;

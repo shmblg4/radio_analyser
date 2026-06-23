@@ -166,6 +166,7 @@ private:
     QLabel *listeningStatusLabel;
     QLabel *listeningFrequencyLabel;
     QDoubleSpinBox *demodOffsetSpinBox = nullptr;
+    QComboBox *demodModeCombo_ = nullptr;
 
     QGroupBox *detectedFrequenciesGroup;
     QListWidget *detectedFrequenciesList;
