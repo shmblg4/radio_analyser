@@ -1,4 +1,5 @@
 #include "AnalysisParams.hpp"
+#include "FpgaFftProcessor.hpp"
 #include "MainWindowConstants.hpp"
 
 #include <cmath>
@@ -65,6 +66,14 @@ double estimateToneFreqHz(const std::vector<std::complex<double>> &samples,
     fftw_free(in);
     fftw_free(out);
     return freqHz;
+}
+
+void writeLeI32(std::vector<uint8_t> &buf, size_t offset, int32_t value) {
+    const uint32_t v = static_cast<uint32_t>(value);
+    buf[offset] = static_cast<uint8_t>(v & 0xffU);
+    buf[offset + 1] = static_cast<uint8_t>((v >> 8) & 0xffU);
+    buf[offset + 2] = static_cast<uint8_t>((v >> 16) & 0xffU);
+    buf[offset + 3] = static_cast<uint8_t>((v >> 24) & 0xffU);
 }
 
 }
@@ -142,6 +151,124 @@ int main() {
     if (maxAnalysisSpanMHz(1.0) < ANALYSIS_MIN_SPAN_MHZ - 1e-6) {
         std::cerr << "maxAnalysisSpanMHz minimum check failed\n";
         return EXIT_FAILURE;
+    }
+
+    {
+        std::vector<std::complex<float>> iq(FpgaFftProcessor::kFftSize);
+        const size_t center = FpgaFftProcessor::kFftSize / 2;
+        iq[center] = {1.0f, 0.5f};
+        const auto tx = FpgaFftProcessor::makeTxFrame(iq, false);
+        if (tx.size() != FpgaFftProcessor::kTxFrameBytes ||
+            static_cast<int8_t>(tx[0]) != 0 ||
+            static_cast<int8_t>(tx[1]) != 0 ||
+            static_cast<int8_t>(tx[2 * center]) != 127 ||
+            static_cast<int8_t>(tx[2 * center + 1]) != 63) {
+            std::cerr << "FPGA TX frame int8 IQ conversion failed\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        std::vector<uint8_t> rx(FpgaFftProcessor::kRxFrameBytes, 0);
+        const int mirroredBin = 924;
+        const size_t offset =
+            static_cast<size_t>(mirroredBin) * 2U * sizeof(int32_t);
+        writeLeI32(rx, offset, 100000);
+        writeLeI32(rx, offset + sizeof(int32_t), 0);
+
+        const auto spectrum =
+            FpgaFftProcessor::rxFrameToSpectrumDb(rx.data(), rx.size());
+        int bestBin = 0;
+        double bestPower = -1e9;
+        for (int i = 0; i < static_cast<int>(spectrum.size()); ++i) {
+            if (spectrum[static_cast<size_t>(i)] > bestPower) {
+                bestPower = spectrum[static_cast<size_t>(i)];
+                bestBin = i;
+            }
+        }
+        const int expectedDisplayBin =
+            FpgaFftProcessor::kFftSize / 2 + 100;
+        if (bestBin != expectedDisplayBin) {
+            std::cerr << "FPGA mirrored/shifted bin correction failed: expected "
+                      << expectedDisplayBin << " got "
+                      << bestBin << "\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        std::vector<uint8_t> rx(FpgaFftProcessor::kRxFrameBytes, 0);
+        const int mirroredBin = 924;
+        const size_t offset =
+            static_cast<size_t>(mirroredBin) * 2U * sizeof(int32_t);
+        writeLeI32(rx, offset, 100000);
+        writeLeI32(rx, offset + sizeof(int32_t), 0);
+
+        const auto spectrum =
+            FpgaFftProcessor::rxFrameToSpectrumDb(rx.data(), rx.size() - 1);
+        if (spectrum.size() !=
+            static_cast<size_t>(FpgaFftProcessor::kFftSize)) {
+            std::cerr << "FPGA partial RX frame parse failed\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        std::vector<int8_t> raw(FpgaFftProcessor::kFftSize * 2, 0);
+        for (size_t i = 0; i < raw.size(); i += 2) {
+            raw[i] = 20;
+            raw[i + 1] = -12;
+        }
+        const auto tx =
+            FpgaFftProcessor::makeTxFrameFromRaw(raw.data(),
+                                                 FpgaFftProcessor::kFftSize,
+                                                 false);
+        bool anyNonzero = false;
+        for (uint8_t b : tx) {
+            if (static_cast<int8_t>(b) != 0) {
+                anyNonzero = true;
+                break;
+            }
+        }
+        if (anyNonzero) {
+            std::cerr << "FPGA raw DC removal failed\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        std::vector<double> comb(1024, -240.0);
+        for (int i = 0; i < 320; ++i) {
+            comb[static_cast<size_t>(i)] = -22.875632;
+        }
+        if (!FpgaFftProcessor::isCombGarbageSpectrum(comb)) {
+            std::cerr << "FPGA comb garbage detector failed on flat comb\n";
+            return EXIT_FAILURE;
+        }
+
+        std::vector<double> tone(1024, -120.0);
+        tone[100] = -20.0;
+        tone[200] = -35.0;
+        if (FpgaFftProcessor::isCombGarbageSpectrum(tone)) {
+            std::cerr << "FPGA comb garbage detector rejected valid tone\n";
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        std::vector<double> saturated(1024, 48.0);
+        if (!FpgaFftProcessor::isSaturatedSpectrum(saturated)) {
+            std::cerr << "FPGA saturated spectrum detector failed on pegged frame\n";
+            return EXIT_FAILURE;
+        }
+
+        std::vector<double> tone(1024, -120.0);
+        tone[100] = -5.0;
+        tone[200] = -18.0;
+        if (FpgaFftProcessor::isSaturatedSpectrum(tone)) {
+            std::cerr << "FPGA saturated spectrum detector rejected valid tone\n";
+            return EXIT_FAILURE;
+        }
     }
 
     std::cout << "DSP self-test passed\n";

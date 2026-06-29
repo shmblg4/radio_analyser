@@ -1,5 +1,6 @@
 #include "MainWindow.hpp"
 #include "AnalysisParams.hpp"
+#include "AudioProcessorThread.hpp"
 #include "MainWindowConstants.hpp"
 #include <QFontDatabase>
 #include <QMessageBox>
@@ -52,10 +53,6 @@ void MainWindow::setupPlot() {
 
     if (currentPlotMode == PlotMode::Spectrum) {
         plot->addGraph();
-        if (appMode_ == AppMode::Detection) {
-            plot->addGraph();
-            plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
-        }
         plot->graph(0)->setPen(QPen(Qt::blue));
         plot->xAxis->setLabel("Frequency (MHz)");
         plot->yAxis->setLabel("Amplitude (dBFS)");
@@ -66,13 +63,6 @@ void MainWindow::setupPlot() {
             y[i] = -200.0;
         }
         plot->graph(0)->setData(x, y);
-        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
-            QVector<double> y2(fftSize);
-            for (int i = 0; i < fftSize; ++i) {
-                y2[i] = average_power + threshold;
-            }
-            plot->graph(1)->setData(x, y2);
-        }
         plot->yAxis->setRange(-100.0, 50.0);
         plot->xAxis->setRange(start_freq_mhz, end_freq_mhz);
     } else {
@@ -102,6 +92,7 @@ void MainWindow::setupPlot() {
     }
 
     updatePlotTheme(darkTheme_);
+    setupSpectrumCursor();
     plot->replot();
 }
 
@@ -134,6 +125,17 @@ void MainWindow::setupControls() {
     analysisFftBox_->addItem("1024", 1024);
     analysisFftBox_->setCurrentIndex(
         analysisFftBox_->findData(ANALYSIS_DEFAULT_SWEEP_FFT_SIZE));
+
+    fftBackendBox_ = new QComboBox();
+    fftBackendBox_->addItem("FFTW3", static_cast<int>(FftBackend::FFTW3));
+    fftBackendBox_->addItem("FPGA FFT", static_cast<int>(FftBackend::FPGA));
+    fftBackendBox_->setCurrentIndex(0);
+    connect(fftBackendBox_,
+            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        enforceFftBackendConstraints();
+        applyFftBackendToDevice();
+    });
 
     sampleRateSpinBox = new QDoubleSpinBox();
     sampleRateSpinBox->setRange(MIN_SAMPLE_RATE_MHZ, MAX_SAMPLE_RATE_MHZ);
@@ -247,59 +249,6 @@ void MainWindow::setupControls() {
     detectionLayout->addWidget(detectionApplyButton);
     detectionLayout->addStretch();
     detectionControlsGroup_->setLayout(detectionLayout);
-}
-
-void MainWindow::setupInfo() {
-    averagePowerLabel = new QLabel(QString::number(average_power));
-    rbwLabel = new QLabel("--");
-    detectionToleranceLabel = new QLabel("--");
-    segmentsInfoLabel_ = new QLabel("--");
-    totalBinsInfoLabel_ = new QLabel("--");
-    analysisHintLabel_ = new QLabel("--");
-    analysisHintLabel_->setWordWrap(true);
-
-    QVBoxLayout *infoLayout = new QVBoxLayout;
-
-    averagePowerRow_ = new QWidget(this);
-    QVBoxLayout *avgLayout = new QVBoxLayout(averagePowerRow_);
-    avgLayout->setContentsMargins(0, 0, 0, 0);
-    avgLayout->addWidget(new QLabel(tr("Average Power (dBFS):"), this));
-    avgLayout->addWidget(averagePowerLabel);
-    infoLayout->addWidget(averagePowerRow_);
-
-    infoLayout->addWidget(new QLabel(tr("RBW (Hz/bin):"), this));
-    infoLayout->addWidget(rbwLabel);
-
-    segmentsInfoRow_ = new QWidget(this);
-    QVBoxLayout *segmentsLayout = new QVBoxLayout(segmentsInfoRow_);
-    segmentsLayout->setContentsMargins(0, 0, 0, 0);
-    segmentsLayout->addWidget(new QLabel(tr("Сегментов (×5 MHz):"), this));
-    segmentsLayout->addWidget(segmentsInfoLabel_);
-    infoLayout->addWidget(segmentsInfoRow_);
-
-    totalBinsInfoRow_ = new QWidget(this);
-    QVBoxLayout *binsLayout = new QVBoxLayout(totalBinsInfoRow_);
-    binsLayout->setContentsMargins(0, 0, 0, 0);
-    binsLayout->addWidget(new QLabel(tr("FFT / всего bins:"), this));
-    binsLayout->addWidget(totalBinsInfoLabel_);
-    infoLayout->addWidget(totalBinsInfoRow_);
-
-    detectionToleranceRow_ = new QWidget(this);
-    QVBoxLayout *tolLayout = new QVBoxLayout(detectionToleranceRow_);
-    tolLayout->setContentsMargins(0, 0, 0, 0);
-    tolLayout->addWidget(new QLabel(tr("Detection Tolerance (kHz):"), this));
-    tolLayout->addWidget(detectionToleranceLabel);
-    infoLayout->addWidget(detectionToleranceRow_);
-
-    analysisHintRow_ = new QWidget(this);
-    QVBoxLayout *hintLayout = new QVBoxLayout(analysisHintRow_);
-    hintLayout->setContentsMargins(0, 0, 0, 0);
-    hintLayout->addWidget(analysisHintLabel_);
-    infoLayout->addWidget(analysisHintRow_);
-
-    infoLayout->addStretch();
-    info->setLayout(infoLayout);
-    updateDspMetricsInfo();
 }
 
 void MainWindow::setupMenuBar() {
@@ -451,10 +400,27 @@ void MainWindow::setupLayout() {
                 }
 
                 setupPlot();
-                updateDspMetricsInfo();
                 updateListeningStatus();
             });
         }
+
+        if (!demodModeCombo_) {
+            demodModeCombo_ = new QComboBox(this);
+            demodModeCombo_->addItem(tr("NFM (рация)"),
+                                     static_cast<int>(FmDemodMode::NFM));
+            demodModeCombo_->addItem(tr("WFM (FM-эфир)"),
+                                     static_cast<int>(FmDemodMode::WFM));
+            connect(demodModeCombo_,
+                    static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+                    this, [this](int) {
+                if (audioProcessorThread) {
+                    audioProcessorThread->resetDSPState();
+                    audioProcessorThread->clearPendingQueue();
+                }
+            });
+        }
+        listeningInfoLayout->addWidget(new QLabel(tr("Демодуляция:"), this));
+        listeningInfoLayout->addWidget(demodModeCombo_);
         listeningInfoLayout->addWidget(
             new QLabel(tr("Уход от нуля (IF offset):"), this));
         listeningInfoLayout->addWidget(demodOffsetSpinBox);
@@ -496,10 +462,11 @@ void MainWindow::setupLayout() {
     QVBoxLayout *configColumnLayout = new QVBoxLayout;
     configColumnLayout->addWidget(new QLabel(tr("Центральная частота:"), this));
     configColumnLayout->addWidget(frequencySpinBox);
+    configColumnLayout->addWidget(new QLabel(tr("FFT backend:"), this));
+    configColumnLayout->addWidget(fftBackendBox_);
     configColumnLayout->addWidget(analysisControlsGroup_);
     configColumnLayout->addWidget(detectionControlsGroup_);
     configColumnLayout->addWidget(listeningInfoGroup_);
-    configColumnLayout->addWidget(info);
     configColumnLayout->addStretch();
 
     QWidget *configColumnWidget = new QWidget(this);
@@ -598,36 +565,16 @@ void MainWindow::updateModeControls() {
     }
 
     if (frequencySpinBox) {
-        if (analysis) {
-            frequencySpinBox->setRange(ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
-        } else {
-            frequencySpinBox->setRange(DETECTION_MIN_FREQ_MHZ, DETECTION_MAX_FREQ_MHZ);
-        }
+        frequencySpinBox->setRange(ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
         frequencySpinBox->setDecimals(3);
         frequencySpinBox->setSingleStep(0.001);
-    }
-
-    if (averagePowerRow_) {
-        averagePowerRow_->setVisible(!analysis);
-    }
-    if (detectionToleranceRow_) {
-        detectionToleranceRow_->setVisible(!analysis);
-    }
-    if (segmentsInfoRow_) {
-        segmentsInfoRow_->setVisible(analysis);
-    }
-    if (totalBinsInfoRow_) {
-        totalBinsInfoRow_->setVisible(analysis);
-    }
-    if (analysisHintRow_) {
-        analysisHintRow_->setVisible(analysis);
     }
 
     if (analysis) {
         updateAnalysisSpanRange();
     }
 
-    updateDspMetricsInfo();
+    enforceFftBackendConstraints();
     updateListeningParameterControls();
 }
 
@@ -645,7 +592,6 @@ void MainWindow::updateAnalysisSpanRange() {
     if (analysisSpanSpinBox_->value() < ANALYSIS_MIN_SPAN_MHZ) {
         analysisSpanSpinBox_->setValue(ANALYSIS_MIN_SPAN_MHZ);
     }
-    updateDspMetricsInfo();
 }
 
 void MainWindow::updateDisplayModeControls() {
@@ -669,7 +615,7 @@ void MainWindow::updateListeningParameterControls() {
         analysisSpanSpinBox_->setEnabled(enabled);
     }
     if (analysisFftBox_) {
-        analysisFftBox_->setEnabled(enabled);
+        analysisFftBox_->setEnabled(enabled && !isFpgaFftSelected());
     }
     if (sampleRateSpinBox) {
         sampleRateSpinBox->setEnabled(enabled);
@@ -679,5 +625,11 @@ void MainWindow::updateListeningParameterControls() {
     }
     if (applyButton) {
         applyButton->setEnabled(enabled);
+    }
+    if (fftSizeBox) {
+        fftSizeBox->setEnabled(enabled && !isFpgaFftSelected());
+    }
+    if (fftBackendBox_) {
+        fftBackendBox_->setEnabled(enabled);
     }
 }

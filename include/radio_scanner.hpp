@@ -5,9 +5,24 @@
 #include <complex>
 #include <ctime>
 #include <hackrf.h>
+#include <memory>
 #include <mutex>
 #include <spdlog/spdlog.h>
+#include <string>
 #include <vector>
+
+class FpgaFftProcessor;
+
+enum class FftBackend {
+    FFTW3,
+    FPGA
+};
+
+enum class FftSpectrumSource {
+    Fftw,
+    Fpga,
+    FpgaFailed
+};
 
 struct hackrf_alloc_params {
     uint64_t center_freq = 0;
@@ -35,8 +50,14 @@ public:
         bool remove_dc = true);
     std::vector<double> getMagnitudeSpectrum();
     std::vector<double> getMagnitudeSpectrumFromLatest(bool remove_dc = false);
+    std::vector<double> getMagnitudeSpectrumFromRawLatest(
+        std::vector<int8_t> raw_tail);
     std::vector<double> getMagnitudeSpectrumFromIQ(
         const std::vector<std::complex<float>> &iq_samples);
+    void setFftBackend(FftBackend backend);
+    FftBackend getFftBackend() const;
+    FftSpectrumSource getLastSpectrumSource() const;
+    std::string getLastFftError() const;
 
     const hackrf_alloc_params& getCurrentAllocParams() const {
         return alloc_params_;
@@ -60,6 +81,8 @@ private:
     convertRawSamples(const int8_t *raw_data, size_t num_iq_pairs) const;
     std::vector<double> calculateMagnitudeSpectrum(
         const std::vector<std::complex<float>>& iq_samples, int fft_size) const;
+    std::vector<double> calculateFftwSpectrumDb(
+        const std::vector<std::complex<float>>& iq_samples, int fft_size) const;
     void removeDCOffset(std::vector<std::complex<float>>& iq_samples);
     static void removeBlockDCOffset(std::vector<std::complex<float>>& iq_samples);
     void trimSamplesBufferLocked();
@@ -69,6 +92,12 @@ private:
     float dc_i_accumulator_ = 0.0f;
     float dc_q_accumulator_ = 0.0f;
     mutable std::mutex dc_mutex_;
+
+    FftBackend fft_backend_ = FftBackend::FFTW3;
+    std::unique_ptr<FpgaFftProcessor> fpga_fft_;
+    mutable std::mutex fft_backend_mutex_;
+    std::string last_fft_error_;
+    FftSpectrumSource last_spectrum_source_ = FftSpectrumSource::Fftw;
 };
 
 #endif

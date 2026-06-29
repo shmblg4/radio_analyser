@@ -5,6 +5,34 @@
 #include <algorithm>
 #include <spdlog/spdlog.h>
 
+namespace {
+
+struct FmDemodParams {
+    double fm_deviation_hz;
+    double deemphasis_tau_sec;
+    double audio_low_cut_hz;
+    double audio_high_cut_hz;
+    double channel_cutoff_cap_hz;
+    double target_demod_rate_hz;
+    float mag_gate_threshold;
+    float agc_min_peak;
+    bool use_double_hp;
+};
+
+FmDemodParams fmDemodParamsFor(FmDemodMode mode) {
+    switch (mode) {
+    case FmDemodMode::WFM:
+        return {75000.0, 75e-6, 30.0, 15000.0, 110000.0, 250000.0,
+                0.005f, 8.0f, false};
+    case FmDemodMode::NFM:
+    default:
+        return {5000.0, 75e-6, 380.0, 3000.0, 10000.0, 96000.0,
+                0.005f, 100.0f, true};
+    }
+}
+
+}  // namespace
+
 AudioProcessorThread::AudioProcessorThread(QObject *parent)
     : QThread(parent) {
 }
@@ -31,7 +59,8 @@ void AudioProcessorThread::clearPendingQueue() {
 
 void AudioProcessorThread::processIQSamples(std::vector<std::complex<float>> iq_samples,
                                            double sample_rate, int audio_rate,
-                                           double demod_if_offset_hz) {
+                                           double demod_if_offset_hz,
+                                           FmDemodMode demod_mode) {
     if (should_stop_ || iq_samples.empty()) {
         return;
     }
@@ -41,6 +70,7 @@ void AudioProcessorThread::processIQSamples(std::vector<std::complex<float>> iq_
     data.sample_rate = sample_rate;
     data.audio_rate = audio_rate;
     data.demod_if_offset_hz = demod_if_offset_hz;
+    data.demod_mode = demod_mode;
     data.valid = true;
 
     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -71,7 +101,8 @@ void AudioProcessorThread::run() {
             auto audio_samples = processDemodulation(data.iq_samples,
                                                      data.sample_rate,
                                                      data.audio_rate,
-                                                     data.demod_if_offset_hz);
+                                                     data.demod_if_offset_hz,
+                                                     data.demod_mode);
             if (!audio_samples.empty()) {
                 emit audioSamplesReady(audio_samples);
             }
@@ -86,7 +117,8 @@ void AudioProcessorThread::run() {
 std::vector<int16_t> AudioProcessorThread::processDemodulation(
     const std::vector<std::complex<float>> &iq_samples,
     double sample_rate, int audio_rate,
-    double demod_if_offset_hz) {
+    double demod_if_offset_hz,
+    FmDemodMode demod_mode) {
 
     if (iq_samples.size() < 2) {
         return {};
@@ -96,13 +128,12 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         return {};
     }
 
-    constexpr double kTargetDemodRateHz = 96000.0;
-    const int channel_decim =
-        std::max(1, static_cast<int>(std::floor(sample_rate / kTargetDemodRateHz)));
-    const double channel_sample_rate = sample_rate / channel_decim;
-    const float limiter_threshold = 0.005f;
+    const FmDemodParams params = fmDemodParamsFor(demod_mode);
 
-    const double fm_deviation_hz = 5000.0;
+    const int channel_decim = std::max(
+        1, static_cast<int>(std::floor(sample_rate / params.target_demod_rate_hz)));
+    const double channel_sample_rate = sample_rate / channel_decim;
+    const float mag_gate_threshold = params.mag_gate_threshold;
 
     DSPState local_state;
     {
@@ -116,7 +147,10 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     channelized.reserve(iq_samples.size() /
                         static_cast<size_t>(channel_decim) + 1U);
 
-    const double channel_cutoff_hz = std::min(10000.0, 0.45 * channel_sample_rate);
+    const double channel_cutoff_hz =
+        (params.channel_cutoff_cap_hz > 0.0)
+            ? std::min(params.channel_cutoff_cap_hz, 0.45 * channel_sample_rate)
+            : (0.45 * channel_sample_rate);
     const double lp_alpha = 1.0 - std::exp(-2.0 * M_PI * channel_cutoff_hz / sample_rate);
     const float lp_alpha_f = static_cast<float>(lp_alpha);
     const float lp_one_minus_alpha = 1.0f - lp_alpha_f;
@@ -168,11 +202,12 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     demod.reserve(channelized.size());
     
 
-    const float phase_scale = static_cast<float>(channel_sample_rate / (2.0 * M_PI * fm_deviation_hz));
+    const float phase_scale = static_cast<float>(
+        channel_sample_rate / (2.0 * M_PI * params.fm_deviation_hz));
     
     std::complex<float> prev = channelized[0];
     float prev_mag = std::abs(prev);
-    if (prev_mag > limiter_threshold) {
+    if (prev_mag > mag_gate_threshold) {
         prev /= prev_mag;
     } else {
         prev = std::complex<float>(1.0f, 0.0f);
@@ -180,7 +215,7 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     for (size_t i = 1; i < channelized.size(); ++i) {
         std::complex<float> curr = channelized[i];
         float curr_mag = std::abs(curr);
-        if (curr_mag > limiter_threshold) {
+        if (curr_mag > mag_gate_threshold) {
             curr /= curr_mag;
             std::complex<float> diff = curr * std::conj(prev);
             float angle = std::atan2(diff.imag(), diff.real());
@@ -205,7 +240,7 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         }
     }
 
-    const double deemphasis_tau_sec = 75e-6;
+    const double deemphasis_tau_sec = params.deemphasis_tau_sec;
     const float deemph_alpha =
         static_cast<float>(std::exp(-1.0 / (channel_sample_rate * deemphasis_tau_sec)));
     const float deemph_one_minus_alpha = 1.0f - deemph_alpha;
@@ -215,8 +250,8 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
         v = local_state.deemphasis_state;
     }
 
-    const double voice_low_cut_hz = 380.0;
-    const double voice_high_cut_hz = 3000.0;
+    const double voice_low_cut_hz = params.audio_low_cut_hz;
+    const double voice_high_cut_hz = params.audio_high_cut_hz;
     const float hp_alpha = static_cast<float>(
         std::exp(-2.0 * M_PI * voice_low_cut_hz / channel_sample_rate));
     const float voice_lp_alpha = static_cast<float>(
@@ -227,19 +262,30 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
     filtered_demod.reserve(demod.size());
     
     for (size_t i = 0; i < demod.size(); ++i) {
-        const float hp1 = hp_alpha * (local_state.voice_hp_prev_output + demod[i] -
-                                      local_state.voice_hp_prev_input);
-        local_state.voice_hp_prev_input = demod[i];
-        local_state.voice_hp_prev_output = hp1;
+        if (params.use_double_hp) {
+            const float hp1 = hp_alpha * (local_state.voice_hp_prev_output + demod[i] -
+                                          local_state.voice_hp_prev_input);
+            local_state.voice_hp_prev_input = demod[i];
+            local_state.voice_hp_prev_output = hp1;
 
-        const float hp2 = hp_alpha * (local_state.voice_hp2_prev_output + hp1 -
-                                       local_state.voice_hp2_prev_input);
-        local_state.voice_hp2_prev_input = hp1;
-        local_state.voice_hp2_prev_output = hp2;
+            const float hp2 = hp_alpha * (local_state.voice_hp2_prev_output + hp1 -
+                                           local_state.voice_hp2_prev_input);
+            local_state.voice_hp2_prev_input = hp1;
+            local_state.voice_hp2_prev_output = hp2;
 
-        local_state.voice_lp_state =
-            voice_lp_alpha * hp2 +
-            voice_lp_one_minus_alpha * local_state.voice_lp_state;
+            local_state.voice_lp_state =
+                voice_lp_alpha * hp2 +
+                voice_lp_one_minus_alpha * local_state.voice_lp_state;
+        } else {
+            const float hp = hp_alpha * (local_state.voice_hp_prev_output + demod[i] -
+                                         local_state.voice_hp_prev_input);
+            local_state.voice_hp_prev_input = demod[i];
+            local_state.voice_hp_prev_output = hp;
+
+            local_state.voice_lp_state =
+                voice_lp_alpha * hp +
+                voice_lp_one_minus_alpha * local_state.voice_lp_state;
+        }
         filtered_demod.push_back(local_state.voice_lp_state);
     }
 
@@ -273,14 +319,14 @@ std::vector<int16_t> AudioProcessorThread::processDemodulation(
 
     float maxVal = 0.0f;
     for (float v : resampled) {
-        float absv = std::abs(v);
+        const float absv = std::abs(v);
         if (absv > maxVal) {
             maxVal = absv;
         }
     }
 
-    const float minPeak = 100.0f;
-    const float strongScale = 0.8f;
+    const float minPeak = params.agc_min_peak;
+    const float strongScale = 0.85f;
     const float weakScaleFraction = 0.4f;
     float scale;
     if (maxVal > minPeak) {

@@ -52,6 +52,8 @@ void MainWindow::toggleListening() {
 
     if (!listeningActive) {
         listeningActive = true;
+        enforceFftBackendConstraints();
+        applyFftBackendToDevice();
 
         const double desired_center_hz =
             frequencySpinBox ? (frequencySpinBox->value() * 1e6) : 0.0;
@@ -79,7 +81,6 @@ void MainWindow::toggleListening() {
         }
         
         setupPlot();
-        updateDspMetricsInfo();
         logBaselineMetrics("startListening");
 
         if (listenToggleButton)
@@ -106,12 +107,16 @@ void MainWindow::toggleListening() {
                 return;
             }
         }
-        spdlog::info("Starting audio processing: target_freq={} Hz, tuned_freq={} Hz, if_offset={} Hz, sample_rate={} Hz, bandwidth={} Hz",
+        spdlog::info("Starting audio processing: target_freq={} Hz, tuned_freq={} Hz, if_offset={} Hz, sample_rate={} Hz, bandwidth={} Hz, demod={}",
                      static_cast<uint64_t>(std::llround(desired_center_hz)),
                      alloc_params.center_freq,
                      demod_if_offset_hz,
                      alloc_params.sample_rate,
-                     alloc_params.bandwidth);
+                     alloc_params.bandwidth,
+                     demodModeCombo_ && demodModeCombo_->currentData().toInt() ==
+                                            static_cast<int>(FmDemodMode::WFM)
+                         ? "WFM"
+                         : "NFM");
         if (audioProcessorThread) {
             audioProcessorThread->resetDSPState();
             audioProcessorThread->clearPendingQueue();
@@ -128,7 +133,6 @@ void MainWindow::toggleListening() {
     }
 
     updateListeningParameterControls();
-    updateDspMetricsInfo();
     if (listeningStatusLabel || listeningFrequencyLabel) {
         updateListeningStatus();
     }
@@ -157,8 +161,13 @@ void MainWindow::processAudio() {
     
     const double demod_if_offset_hz =
         demodOffsetSpinBox ? demodOffsetSpinBox->value() : 0.0;
+    const FmDemodMode demod_mode =
+        demodModeCombo_
+            ? static_cast<FmDemodMode>(demodModeCombo_->currentData().toInt())
+            : FmDemodMode::NFM;
     audioProcessorThread->processIQSamples(std::move(iq_samples), in_sample_rate,
-                                           audio_rate, demod_if_offset_hz);
+                                           audio_rate, demod_if_offset_hz,
+                                           demod_mode);
 #endif
 }
 

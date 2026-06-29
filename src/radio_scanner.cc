@@ -1,5 +1,6 @@
 #include "radio_scanner.hpp"
 #include "colors.hpp"
+#include "FpgaFftProcessor.hpp"
 #include <cmath>
 #include <fftw3.h>
 #include <algorithm>
@@ -555,11 +556,60 @@ std::vector<double> HackrfDevice::getMagnitudeSpectrumFromLatest(bool remove_dc)
         samples_buffer_.clear();
     }
 
+    {
+        FftBackend backend = FftBackend::FFTW3;
+        {
+            std::lock_guard<std::mutex> lock(fft_backend_mutex_);
+            backend = fft_backend_;
+        }
+        if (backend == FftBackend::FPGA &&
+            fft_size == FpgaFftProcessor::kFftSize) {
+            return getMagnitudeSpectrumFromRawLatest(std::move(tail));
+        }
+    }
+
     auto iq_samples = convertRawSamples(tail.data(), static_cast<size_t>(fft_size));
     if (remove_dc && !iq_samples.empty()) {
         removeBlockDCOffset(iq_samples);
     }
     return getMagnitudeSpectrumFromIQ(iq_samples);
+}
+
+std::vector<double> HackrfDevice::getMagnitudeSpectrumFromRawLatest(
+    std::vector<int8_t> raw_tail) {
+    const int fft_size = alloc_params_.fft_size;
+    if (fft_size != FpgaFftProcessor::kFftSize ||
+        raw_tail.size() < static_cast<size_t>(fft_size) * 2) {
+        return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
+    }
+
+    std::lock_guard<std::mutex> lock(fft_backend_mutex_);
+    if (fft_backend_ != FftBackend::FPGA) {
+        auto iq_samples =
+            convertRawSamples(raw_tail.data(), static_cast<size_t>(fft_size));
+        last_spectrum_source_ = FftSpectrumSource::Fftw;
+        return calculateFftwSpectrumDb(iq_samples, fft_size);
+    }
+
+    if (!fpga_fft_) {
+        fpga_fft_ = std::make_unique<FpgaFftProcessor>();
+    }
+
+    std::vector<double> fpga_spectrum_db;
+    std::string error;
+    if (fpga_fft_->processFromRaw(raw_tail.data(), static_cast<size_t>(fft_size),
+                                  fpga_spectrum_db, error)) {
+        last_fft_error_.clear();
+        last_spectrum_source_ = FftSpectrumSource::Fpga;
+        return fpga_spectrum_db;
+    }
+
+    last_spectrum_source_ = FftSpectrumSource::FpgaFailed;
+    if (error != last_fft_error_) {
+        spdlog::warn("FPGA FFT failed: {}", error);
+        last_fft_error_ = error;
+    }
+    return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
 }
 
 std::vector<double> HackrfDevice::getMagnitudeSpectrum() {
@@ -578,7 +628,77 @@ std::vector<double> HackrfDevice::getMagnitudeSpectrumFromIQ(
     if (iq_samples.empty()) {
         return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
     }
-    
+
+    {
+        std::lock_guard<std::mutex> lock(fft_backend_mutex_);
+        if (fft_backend_ == FftBackend::FPGA) {
+            if (fft_size == FpgaFftProcessor::kFftSize) {
+                if (!fpga_fft_) {
+                    fpga_fft_ = std::make_unique<FpgaFftProcessor>();
+                }
+
+                std::vector<double> fpga_spectrum_db;
+                std::string error;
+                if (fpga_fft_->process(iq_samples, fpga_spectrum_db, error)) {
+                    last_fft_error_.clear();
+                    last_spectrum_source_ = FftSpectrumSource::Fpga;
+                    return fpga_spectrum_db;
+                }
+
+                last_spectrum_source_ = FftSpectrumSource::FpgaFailed;
+                if (error != last_fft_error_) {
+                    spdlog::warn("FPGA FFT failed: {}", error);
+                    last_fft_error_ = error;
+                }
+                return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
+            }
+
+            const std::string error =
+                "FPGA FFT supports only 1024 bins, current fft_size=" +
+                std::to_string(fft_size);
+            last_spectrum_source_ = FftSpectrumSource::FpgaFailed;
+            if (error != last_fft_error_) {
+                spdlog::warn("FPGA FFT unavailable: {}", error);
+                last_fft_error_ = error;
+            }
+            return std::vector<double>(static_cast<size_t>(fft_size), -200.0);
+        }
+
+        last_spectrum_source_ = FftSpectrumSource::Fftw;
+    }
+
+    return calculateFftwSpectrumDb(iq_samples, fft_size);
+}
+
+void HackrfDevice::setFftBackend(FftBackend backend) {
+    std::lock_guard<std::mutex> lock(fft_backend_mutex_);
+    if (fft_backend_ == backend) {
+        return;
+    }
+    fft_backend_ = backend;
+    last_fft_error_.clear();
+    last_spectrum_source_ = (backend == FftBackend::FPGA)
+                                ? FftSpectrumSource::FpgaFailed
+                                : FftSpectrumSource::Fftw;
+}
+
+FftBackend HackrfDevice::getFftBackend() const {
+    std::lock_guard<std::mutex> lock(fft_backend_mutex_);
+    return fft_backend_;
+}
+
+FftSpectrumSource HackrfDevice::getLastSpectrumSource() const {
+    std::lock_guard<std::mutex> lock(fft_backend_mutex_);
+    return last_spectrum_source_;
+}
+
+std::string HackrfDevice::getLastFftError() const {
+    std::lock_guard<std::mutex> lock(fft_backend_mutex_);
+    return last_fft_error_;
+}
+
+std::vector<double> HackrfDevice::calculateFftwSpectrumDb(
+    const std::vector<std::complex<float>>& iq_samples, int fft_size) const {
     std::vector<double> magnitudes = calculateMagnitudeSpectrum(iq_samples, fft_size);
     
     if (magnitudes.empty()) {

@@ -34,6 +34,31 @@ pkg_check_modules(FFTW3 REQUIRED fftw3)
 # Find HackRF using pkg-config
 pkg_check_modules(HACKRF libhackrf)
 
+# FTDI D2XX is optional: without the SDK the FPGA backend remains visible but
+# falls back to FFTW3 with a clear log message.
+find_path(FTD2XX_INCLUDE_DIR
+    NAMES ftd2xx.h
+    PATHS
+        /usr/include
+        /usr/local/include
+        /usr/include/ftd2xx
+        /usr/local/include/ftd2xx
+)
+find_library(FTD2XX_LIBRARY
+    NAMES ftd2xx
+    PATHS
+        /usr/lib
+        /usr/local/lib
+        /usr/lib/x86_64-linux-gnu
+)
+if(FTD2XX_INCLUDE_DIR AND FTD2XX_LIBRARY)
+    set(FTD2XX_FOUND TRUE)
+    message(STATUS "Found FTDI D2XX: ${FTD2XX_LIBRARY}")
+else()
+    set(FTD2XX_FOUND FALSE)
+    message(WARNING "FTDI D2XX not found - FPGA FFT backend will fall back to FFTW3")
+endif()
+
 # If pkg-config didn't find HackRF, try manual search
 if(NOT HACKRF_FOUND)
     message(STATUS "pkg-config didn't find libhackrf, trying manual search...")
@@ -76,6 +101,7 @@ add_executable(radio_analyser
     include/MainWindow.hpp 
     include/AudioProcessorThread.hpp 
     include/SpectrumWorker.hpp 
+    include/FpgaFftProcessor.hpp
     ${SOURCES} 
     ${SRC_FILES}
 )
@@ -96,6 +122,12 @@ target_link_libraries(radio_analyser PRIVATE
     ${FFTW3_LIBRARIES}
 )
 
+if(FTD2XX_FOUND)
+    target_include_directories(radio_analyser PRIVATE ${FTD2XX_INCLUDE_DIR})
+    target_link_libraries(radio_analyser PRIVATE ${FTD2XX_LIBRARY})
+    target_compile_definitions(radio_analyser PRIVATE HAVE_FTDI_D2XX=1)
+endif()
+
 # Add Qt6 Multimedia if available
 if(TARGET Qt6::Multimedia)
     target_link_libraries(radio_analyser PRIVATE Qt6::Multimedia)
@@ -110,10 +142,36 @@ target_compile_options(radio_analyser PRIVATE
 # Testing
 enable_testing()
 
-add_executable(dsp_self_test tests/dsp_self_test.cc src/AnalysisParams.cc)
+add_executable(dsp_self_test
+    tests/dsp_self_test.cc
+    src/AnalysisParams.cc
+    src/FpgaFftProcessor.cc
+)
 target_include_directories(dsp_self_test PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${FFTW3_INCLUDE_DIRS}
 )
-target_link_libraries(dsp_self_test PRIVATE ${FFTW3_LIBRARIES})
+target_link_libraries(dsp_self_test PRIVATE
+    ${FFTW3_LIBRARIES}
+    spdlog::spdlog
+)
+if(FTD2XX_FOUND)
+    target_include_directories(dsp_self_test PRIVATE ${FTD2XX_INCLUDE_DIR})
+    target_link_libraries(dsp_self_test PRIVATE ${FTD2XX_LIBRARY})
+    target_compile_definitions(dsp_self_test PRIVATE HAVE_FTDI_D2XX=1)
+endif()
 add_test(NAME dsp_self_test COMMAND dsp_self_test)
+
+add_executable(fpga_fft_smoke_test
+    tests/fpga_fft_smoke_test.cc
+    src/FpgaFftProcessor.cc
+)
+target_include_directories(fpga_fft_smoke_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(fpga_fft_smoke_test PRIVATE spdlog::spdlog)
+if(FTD2XX_FOUND)
+    target_include_directories(fpga_fft_smoke_test PRIVATE ${FTD2XX_INCLUDE_DIR})
+    target_link_libraries(fpga_fft_smoke_test PRIVATE ${FTD2XX_LIBRARY})
+    target_compile_definitions(fpga_fft_smoke_test PRIVATE HAVE_FTDI_D2XX=1)
+endif()

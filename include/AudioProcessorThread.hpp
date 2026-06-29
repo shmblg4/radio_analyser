@@ -9,6 +9,8 @@
 #include <mutex>
 #include <atomic>
 
+enum class FmDemodMode { NFM, WFM };
+
 class AudioProcessorThread : public QThread {
     Q_OBJECT
 
@@ -18,7 +20,8 @@ public:
 
     void processIQSamples(std::vector<std::complex<float>> iq_samples,
                          double sample_rate, int audio_rate,
-                         double demod_if_offset_hz);
+                         double demod_if_offset_hz,
+                         FmDemodMode demod_mode = FmDemodMode::NFM);
     void stopProcessing();
     void resetDSPState();
     void clearPendingQueue();
@@ -32,13 +35,15 @@ protected:
 private:
     std::vector<int16_t> processDemodulation(const std::vector<std::complex<float>> &iq_samples,
                                             double sample_rate, int audio_rate,
-                                            double demod_if_offset_hz);
+                                            double demod_if_offset_hz,
+                                            FmDemodMode demod_mode);
 
     struct ProcessingData {
         std::vector<std::complex<float>> iq_samples;
         double sample_rate = 0.0;
         int audio_rate = 0;
         double demod_if_offset_hz = 0.0;
+        FmDemodMode demod_mode = FmDemodMode::NFM;
         bool valid = false;
     };
 

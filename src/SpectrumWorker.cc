@@ -2,6 +2,7 @@
 #include "MainWindowConstants.hpp"
 
 #include <QThread>
+#include <algorithm>
 #include <atomic>
 #include <spdlog/spdlog.h>
 
@@ -93,10 +94,12 @@ bool SpectrumWorker::captureSegmentSpectrum(
                                     ANALYSIS_SWEEP_SETTLE_MS + 40)) {
         return false;
     }
-    (void)device_->getMagnitudeSpectrumFromLatest(true);
+    if (device_->getFftBackend() != FftBackend::FPGA) {
+        (void)device_->getMagnitudeSpectrumFromLatest(true);
 
-    if (!device_->waitForRawSamples(raw_needed, 40)) {
-        return false;
+        if (!device_->waitForRawSamples(raw_needed, 40)) {
+            return false;
+        }
     }
     segment_spectrum = device_->getMagnitudeSpectrumFromLatest(true);
     if (segment_spectrum.size() != static_cast<size_t>(fft_size)) {

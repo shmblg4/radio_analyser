@@ -1,12 +1,15 @@
 #include "MainWindow.hpp"
+#include <QMouseEvent>
 #include "AnalysisParams.hpp"
 #include "MainWindowConstants.hpp"
 #include "AudioProcessorThread.hpp"
+#include "FpgaFftProcessor.hpp"
 #include "LogSink.hpp"
 #include "SpectrumWorker.hpp"
 #include "radio_scanner.hpp"
 
 #include <QMetaObject>
+#include <QSignalBlocker>
 #include <QThread>
 
 #ifdef HAVE_QT_AUDIO
@@ -75,9 +78,7 @@ MainWindow::MainWindow(QWidget *parent)
     configure();
 
     this->setWindowTitle("Radio Analyser");
-    info = new QGroupBox(tr("Info"));
     setupControls();
-    setupInfo();
     rebuildAnalysisSweepPlan();
     alloc_params = allocFromSweepPlan(analysisSweepPlan_);
     fftSize = analysisSweepPlan_.total_bins;
@@ -119,6 +120,11 @@ MainWindow::MainWindow(QWidget *parent)
     setCentralWidget(centralWidget);
     setupLayout();
 
+    plot->setMouseTracking(true);
+    plot->installEventFilter(this);
+    connect(plot, &QCustomPlot::mouseMove, this, &MainWindow::onPlotMouseMove);
+    connect(plot, &QCustomPlot::mousePress, this, &MainWindow::onPlotMousePress);
+
     {
         auto logSink = std::make_shared<LogSink>(this);
         spdlog::default_logger()->sinks().clear();
@@ -134,7 +140,6 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
 
     setupPlot();
-    updateDspMetricsInfo();
     logBaselineMetrics("startup");
     setMinimumSize(1100, 700);
     resize(1200, 800);
@@ -146,6 +151,7 @@ MainWindow::MainWindow(QWidget *parent)
                                   "Failed to configure HackRF device.");
             return;
         }
+        applyFftBackendToDevice();
         device->startRx();
     } catch (const std::exception &e) {
         spdlog::error("Error initializing HackRF: {}", e.what());
@@ -175,6 +181,13 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
+    if (plot) {
+        plot->removeEventFilter(this);
+        disconnect(plot, nullptr, this, nullptr);
+    }
+    spectrumCursorLine_ = nullptr;
+    spectrumCursorLabel_ = nullptr;
+
     spectrumUpdateTimer->stop();
     averagePowerLevelTimer->stop();
     scanActiveTimer->stop();
@@ -205,7 +218,9 @@ void MainWindow::updateSpectrum() {
 }
 
 void MainWindow::onSpectrumReady(std::vector<double> result) {
-    spectrum_db = std::move(result);
+    if (!applyIncomingSpectrum(std::move(result))) {
+        return;
+    }
     refreshSpectrumPlot();
 }
 
@@ -213,7 +228,9 @@ void MainWindow::updateSpectrumFromIQ(const std::vector<std::complex<float>> &iq
     if (!device || iq_samples.empty())
         return;
 
-    spectrum_db = device->getMagnitudeSpectrumFromIQ(iq_samples);
+    if (!applyIncomingSpectrum(device->getMagnitudeSpectrumFromIQ(iq_samples))) {
+        return;
+    }
     refreshSpectrumPlot();
 }
 
@@ -258,7 +275,6 @@ void MainWindow::refreshSpectrumPlot() {
         last_display_span_mhz = display_span_mhz;
         last_display_center_mhz = display_center_mhz;
         last_fft_size = fftSize;
-        updateDspMetricsInfo();
     }
 
     const int wf_bins = waterfallDisplayBins();
@@ -275,12 +291,6 @@ void MainWindow::refreshSpectrumPlot() {
         }
 
         plot->graph(0)->setData(plot_x_cache_, y, true);
-        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
-            QVector<double> y2(fftSize);
-            const double threshold_line = average_power + threshold;
-            y2.fill(threshold_line);
-            plot->graph(1)->setData(plot_x_cache_, y2, true);
-        }
         plot->replot(QCustomPlot::rpQueuedReplot);
     } else {
         if (!waterfallMap) {
@@ -302,8 +312,13 @@ void MainWindow::refreshSpectrumPlot() {
                         data->setCell(i, j, emptyCellDb);
                     }
                 }
-                waterfallWriteRow_ = 0;
                 waterfallGridInitialized_ = true;
+            }
+
+            for (int j = waterfallHistorySize - 1; j >= 1; --j) {
+                for (int i = 0; i < wf_bins; ++i) {
+                    data->setCell(i, j, data->cell(i, j - 1));
+                }
             }
 
             const double step =
@@ -312,21 +327,22 @@ void MainWindow::refreshSpectrumPlot() {
                 const int src =
                     std::min(fftSize - 1, static_cast<int>(i * step));
                 data->setCell(
-                    i, waterfallWriteRow_,
-                    spectrum_db[static_cast<size_t>(src)]);
+                    i, 0, spectrum_db[static_cast<size_t>(src)]);
             }
-            waterfallWriteRow_ = (waterfallWriteRow_ + 1) % waterfallHistorySize;
 
             plot->replot(QCustomPlot::rpQueuedReplot);
         }
     }
 }
 
-void MainWindow::applyConfig() {
+void MainWindow::applyConfig(bool show_detection_success) {
     if (!device) {
         QMessageBox::warning(this, "Error", "Device is not initialized.");
         return;
     }
+
+    enforceFftBackendConstraints();
+    applyFftBackendToDevice();
 
     if (appMode_ == AppMode::Analysis) {
         rebuildAnalysisSweepPlan();
@@ -344,7 +360,6 @@ void MainWindow::applyConfig() {
         waterfallHistory.clear();
         waterfallGridInitialized_ = false;
         setupPlot();
-        updateDspMetricsInfo();
         logBaselineMetrics("applyConfig");
         updateSpectrumRefreshInterval();
         spdlog::info("Analysis sweep plan applied ({} segments, {} bins).",
@@ -383,12 +398,11 @@ void MainWindow::applyConfig() {
             updateDetectedFrequenciesList();
         }
         setupPlot();
-        updateDspMetricsInfo();
         logBaselineMetrics("applyConfig");
         device->startRx();
         updateSpectrumRefreshInterval();
         spdlog::info("Configuration applied successfully.");
-        if (appMode_ == AppMode::Detection) {
+        if (appMode_ == AppMode::Detection && show_detection_success) {
             QMessageBox::information(this, "Success",
                                      "Configuration applied successfully.");
         }
@@ -409,9 +423,6 @@ void MainWindow::updateAveragePower() {
     }
     const double linear_avg = linear_sum / spectrum_db.size();
     average_power = 10.0 * std::log10(linear_avg + 1e-20);
-
-    averagePowerLabel->setText(QString::number(average_power, 'f', 2));
-    updateDspMetricsInfo();
 }
 
 void MainWindow::toggleDisplayMode() {
@@ -451,6 +462,7 @@ int MainWindow::waterfallDisplayBins() const {
 }
 
 void MainWindow::rebuildAnalysisSweepPlan() {
+    enforceFftBackendConstraints();
     const int fft_per_segment =
         analysisFftBox_ ? analysisFftBox_->currentData().toInt()
                         : ANALYSIS_DEFAULT_SWEEP_FFT_SIZE;
@@ -459,6 +471,68 @@ void MainWindow::rebuildAnalysisSweepPlan() {
         analysisSpanSpinBox_ ? analysisSpanSpinBox_->value()
                              : ANALYSIS_DEFAULT_SPAN_MHZ,
         fft_per_segment);
+}
+
+bool MainWindow::isFpgaFftSelected() const {
+    return fftBackendBox_ &&
+           static_cast<FftBackend>(fftBackendBox_->currentData().toInt()) ==
+               FftBackend::FPGA;
+}
+
+void MainWindow::applyFftBackendToDevice() {
+    if (!device) {
+        return;
+    }
+    clearSpectrumHold();
+    device->setFftBackend(isFpgaFftSelected() ? FftBackend::FPGA
+                                               : FftBackend::FFTW3);
+}
+
+void MainWindow::clearSpectrumHold() {
+    last_good_spectrum_db_.clear();
+}
+
+bool MainWindow::applyIncomingSpectrum(std::vector<double> frame) {
+    if (frame.empty()) {
+        return false;
+    }
+
+    if (isFpgaFftSelected() &&
+        FpgaFftProcessor::isSaturatedSpectrum(frame)) {
+        if (last_good_spectrum_db_.size() == frame.size()) {
+            spectrum_db = last_good_spectrum_db_;
+            return true;
+        }
+        return false;
+    }
+
+    spectrum_db = std::move(frame);
+    if (isFpgaFftSelected()) {
+        last_good_spectrum_db_ = spectrum_db;
+    }
+    return true;
+}
+
+void MainWindow::enforceFftBackendConstraints() {
+    if (!isFpgaFftSelected()) {
+        return;
+    }
+
+    if (analysisFftBox_ &&
+        analysisFftBox_->currentData().toInt() != FpgaFftProcessor::kFftSize) {
+        const QSignalBlocker blocker(analysisFftBox_);
+        analysisFftBox_->setCurrentIndex(
+            analysisFftBox_->findData(FpgaFftProcessor::kFftSize));
+    }
+    if (fftSizeBox &&
+        fftSizeBox->currentData().toInt() != FpgaFftProcessor::kFftSize) {
+        const QSignalBlocker blocker(fftSizeBox);
+        fftSizeBox->setCurrentIndex(
+            fftSizeBox->findData(FpgaFftProcessor::kFftSize));
+        if (fftSizeLabel) {
+            fftSizeLabel->setText(QString::number(FpgaFftProcessor::kFftSize));
+        }
+    }
 }
 
 void MainWindow::updateSpectrumRefreshInterval() {
@@ -519,9 +593,6 @@ void MainWindow::updatePlotTheme(bool dark) {
         plot->yAxis->setTickLabelColor(Qt::white);
         plot->yAxis->setLabelColor(Qt::white);
         if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(QColor(100, 180, 255)));
-        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
-            plot->graph(1)->setPen(QPen(QColor(255, 100, 100), 3, Qt::DashLine));
-        }
     } else {
         plot->setBackground(QBrush(Qt::white));
         plot->xAxis->setBasePen(QPen(Qt::black));
@@ -535,11 +606,146 @@ void MainWindow::updatePlotTheme(bool dark) {
         plot->yAxis->setTickLabelColor(Qt::black);
         plot->yAxis->setLabelColor(Qt::black);
         if (plot->graphCount() >= 1) plot->graph(0)->setPen(QPen(Qt::blue));
-        if (appMode_ == AppMode::Detection && plot->graphCount() >= 2) {
-            plot->graph(1)->setPen(QPen(Qt::red, 3, Qt::DashLine));
-        }
     }
+    updateSpectrumCursorStyle(dark);
     plot->replot();
+}
+
+void MainWindow::setupSpectrumCursor() {
+    spectrumCursorLine_ = nullptr;
+    spectrumCursorLabel_ = nullptr;
+
+    if (currentPlotMode != PlotMode::Spectrum) {
+        return;
+    }
+
+    auto *line = new QCPItemStraightLine(plot);
+    line->setLayer("overlay");
+    line->setClipToAxisRect(true);
+    line->point1->setType(QCPItemPosition::ptPlotCoords);
+    line->point2->setType(QCPItemPosition::ptPlotCoords);
+    line->setVisible(false);
+    spectrumCursorLine_ = line;
+
+    auto *label = new QCPItemText(plot);
+    label->setLayer("overlay");
+    label->setPositionAlignment(Qt::AlignTop | Qt::AlignHCenter);
+    label->position->setType(QCPItemPosition::ptPlotCoords);
+    label->setPadding(QMargins(4, 2, 4, 2));
+    QFont labelFont = label->font();
+    labelFont.setPointSize(9);
+    label->setFont(labelFont);
+    label->setVisible(false);
+    spectrumCursorLabel_ = label;
+
+    updateSpectrumCursorStyle(darkTheme_);
+}
+
+void MainWindow::updateSpectrumCursorStyle(bool dark) {
+    if (!spectrumCursorLine_ || !spectrumCursorLabel_) {
+        return;
+    }
+    if (dark) {
+        spectrumCursorLine_->setPen(QPen(QColor(255, 200, 80), 1, Qt::DashLine));
+        spectrumCursorLabel_->setColor(Qt::white);
+        spectrumCursorLabel_->setBrush(QBrush(QColor(40, 40, 40, 220)));
+        spectrumCursorLabel_->setPen(QPen(QColor(255, 200, 80)));
+    } else {
+        spectrumCursorLine_->setPen(QPen(QColor(200, 100, 0), 1, Qt::DashLine));
+        spectrumCursorLabel_->setColor(Qt::black);
+        spectrumCursorLabel_->setBrush(QBrush(QColor(255, 255, 255, 220)));
+        spectrumCursorLabel_->setPen(QPen(QColor(200, 100, 0)));
+    }
+}
+
+void MainWindow::hideSpectrumCursor() {
+    if (!plot || !spectrumCursorLine_ || !spectrumCursorLabel_) {
+        return;
+    }
+    if (!spectrumCursorLine_->visible()) {
+        return;
+    }
+    spectrumCursorLine_->setVisible(false);
+    spectrumCursorLabel_->setVisible(false);
+    plot->replot(QCustomPlot::rpQueuedReplot);
+}
+
+double MainWindow::spectrumFrequencyMHzAt(const QPoint &pos) const {
+    if (!plot) {
+        return 0.0;
+    }
+    const QCPRange xRange = plot->xAxis->range();
+    return std::clamp(
+        plot->xAxis->pixelToCoord(pos.x()), xRange.lower, xRange.upper);
+}
+
+void MainWindow::onPlotMouseMove(QMouseEvent *event) {
+    if (!plot || !spectrumCursorLine_ || !spectrumCursorLabel_) {
+        return;
+    }
+    if (currentPlotMode != PlotMode::Spectrum) {
+        return;
+    }
+
+    QCPAxisRect *axisRect = plot->axisRect();
+    if (!axisRect || !axisRect->rect().contains(event->pos())) {
+        hideSpectrumCursor();
+        return;
+    }
+
+    const QCPRange yRange = plot->yAxis->range();
+    const double freq_mhz = spectrumFrequencyMHzAt(event->pos());
+
+    spectrumCursorLine_->point1->setCoords(freq_mhz, yRange.lower);
+    spectrumCursorLine_->point2->setCoords(freq_mhz, yRange.upper);
+
+    const double label_y = yRange.upper - 0.02 * yRange.size();
+    spectrumCursorLabel_->position->setCoords(freq_mhz, label_y);
+    spectrumCursorLabel_->setText(QString("%1 MHz").arg(freq_mhz, 0, 'f', 3));
+
+    if (!spectrumCursorLine_->visible()) {
+        spectrumCursorLine_->setVisible(true);
+        spectrumCursorLabel_->setVisible(true);
+    }
+    plot->replot(QCustomPlot::rpQueuedReplot);
+}
+
+void MainWindow::onPlotMousePress(QMouseEvent *event) {
+    if (!plot || !frequencySpinBox) {
+        return;
+    }
+    if (appMode_ != AppMode::Detection || currentPlotMode != PlotMode::Spectrum) {
+        return;
+    }
+    if (event->button() != Qt::LeftButton) {
+        return;
+    }
+
+    QCPAxisRect *axisRect = plot->axisRect();
+    if (!axisRect || !axisRect->rect().contains(event->pos())) {
+        return;
+    }
+
+    double freq_mhz = spectrumFrequencyMHzAt(event->pos());
+    freq_mhz = std::clamp(freq_mhz, ANALYSIS_MIN_FREQ_MHZ, ANALYSIS_MAX_FREQ_MHZ);
+
+    if (std::abs(freq_mhz - frequencySpinBox->value()) < 1e-6) {
+        return;
+    }
+
+    if (listeningActive) {
+        stopListeningInternal();
+    }
+
+    frequencySpinBox->setValue(freq_mhz);
+    applyConfig(false);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == plot && plot && event->type() == QEvent::Leave) {
+        hideSpectrumCursor();
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::scanActive() {
@@ -776,62 +982,6 @@ double MainWindow::estimateSubBinFrequencyMHz(int bin) const {
 
     const double rbw_mhz = getRbwHz() / 1e6;
     return x_axis_values[static_cast<size_t>(bin)] + delta * rbw_mhz;
-}
-
-void MainWindow::updateDspMetricsInfo() {
-    if (!rbwLabel) {
-        return;
-    }
-
-    const double rbw = getRbwHz();
-    rbwLabel->setText(QString("%1").arg(rbw, 0, 'f', 1));
-
-    if (appMode_ == AppMode::Analysis) {
-        if (segmentsInfoLabel_) {
-            segmentsInfoLabel_->setText(QString::number(analysisSweepPlan_.num_segments));
-        }
-        if (totalBinsInfoLabel_) {
-            totalBinsInfoLabel_->setText(
-                QString("%1 / %2")
-                    .arg(analysisSweepPlan_.fft_size_per_segment)
-                    .arg(analysisSweepPlan_.total_bins));
-        }
-        if (analysisHintLabel_ && analysisSpanSpinBox_ && frequencySpinBox) {
-            const double center = frequencySpinBox->value();
-            const double max_span = maxAnalysisSpanMHz(center);
-            const int segments = analysisSweepPlan_.num_segments;
-            const int est_ms =
-                segments * (ANALYSIS_SWEEP_SETTLE_MS + 20);
-
-            QStringList hints;
-            hints << tr("Полоса собирается из %1 захватов по %2 MHz.")
-                         .arg(segments)
-                         .arg(ANALYSIS_SWEEP_SEGMENT_MHZ, 0, 'f', 1);
-            hints << tr("Оценка времени sweep: ~%1 ms.").arg(est_ms);
-            if (analysisSweepPlan_.segments_clamped) {
-                hints << tr("Достигнут лимит %1 сегментов.")
-                           .arg(ANALYSIS_MAX_SWEEP_SEGMENTS);
-            }
-            if (max_span < static_cast<double>(ANALYSIS_MAX_SWEEP_SEGMENTS) *
-                               ANALYSIS_SWEEP_SEGMENT_MHZ - 1e-6) {
-                hints << tr("При частоте %1 MHz макс. полоса: %2 MHz.")
-                           .arg(center, 0, 'f', 3)
-                           .arg(max_span, 0, 'f', 3);
-            }
-            if (fftSize > ANALYSIS_WATERFALL_MAX_BINS) {
-                hints << tr("Waterfall: %1 bins (downsample).")
-                           .arg(ANALYSIS_WATERFALL_MAX_BINS);
-            }
-            analysisHintLabel_->setText(hints.join('\n'));
-        }
-        return;
-    }
-
-    if (detectionToleranceLabel) {
-        const double tol_mhz = getDetectionToleranceMHz();
-        detectionToleranceLabel->setText(
-            QString("%1").arg(tol_mhz * 1e3, 0, 'f', 2));
-    }
 }
 
 void MainWindow::logBaselineMetrics(const char *context) const {
